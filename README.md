@@ -12,6 +12,9 @@ A real-time Docker container monitoring dashboard built with SvelteKit and Socke
 - Beautiful UI with animations and gradients
 - Responsive design
 
+## List View
+![Docker Core Monitor](.github/list-view.png)
+
 ## Quick Start
 
 ### Using Docker
