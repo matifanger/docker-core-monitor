@@ -29,7 +29,8 @@ def calculate_cpu_percent(stats):
         cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
         system_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
         if system_delta > 0 and cpu_delta > 0:
-            return (cpu_delta / system_delta) * cpu_count * 100.0
+            # Calcular el porcentaje real sin multiplicar por cpu_count
+            return (cpu_delta / system_delta) * 100.0
         return 0.0
     except KeyError:
         return 0.0
@@ -48,6 +49,31 @@ def get_container_stats(container):
         started_at = datetime.strptime(started_at_str.split('.')[0] + '.' + started_at_str.split('.')[1][:6] + '+0000', '%Y-%m-%dT%H:%M:%S.%f%z')
         uptime = (time.time() - started_at.timestamp()) if container_status == "running" else 0
         
+        # Obtener límites de CPU
+        cpu_limit = None
+        cpu_shares = None
+        
+        # Verificar si hay límites de CPU configurados
+        host_config = container.attrs.get("HostConfig", {})
+        if host_config.get("NanoCpus"):
+            # NanoCpus está en billonésimas de CPU, convertir a número de CPUs
+            cpu_limit = host_config.get("NanoCpus") / 1e9
+        elif host_config.get("CpuPeriod") and host_config.get("CpuQuota"):
+            # Otra forma de limitar CPUs
+            cpu_limit = host_config.get("CpuQuota") / host_config.get("CpuPeriod")
+        
+        # CPU Shares (peso relativo)
+        if host_config.get("CpuShares") and host_config.get("CpuShares") != 0 and host_config.get("CpuShares") != 1024:
+            cpu_shares = host_config.get("CpuShares")
+        
+        # Obtener número de CPUs asignadas
+        cpu_count = None
+        if container.attrs.get("Config", {}).get("Cpuset"):
+            cpuset = container.attrs.get("Config", {}).get("Cpuset")
+            if cpuset:
+                # Contar cuántos CPUs están asignados en el cpuset
+                cpu_count = len([x for x in cpuset.split(',') if x])
+        
         if container_status == "running":
             stats = container.stats(stream=False)
             memory_stats = stats.get("memory_stats", {})
@@ -55,12 +81,22 @@ def get_container_stats(container):
             blkio = stats.get("blkio_stats", {}).get("io_service_bytes_recursive", [])
             io_read = sum(b["value"] for b in blkio if b["op"] == "Read") or 0
             io_write = sum(b["value"] for b in blkio if b["op"] == "Write") or 0
+            
+            # Verificar si hay un límite de memoria real
+            memory_limit = memory_stats.get("limit", 0)
+            # Si el límite es igual al total del host, consideramos que no hay límite
+            if memory_limit == docker_api.info()["MemTotal"]:
+                memory_limit = 0
+                
             return (container_id, {
                 "name": container_name,
                 "status": container_status,
                 "cpu_percent": calculate_cpu_percent(stats),
+                "cpu_count": stats["cpu_stats"]["online_cpus"],
+                "cpu_limit": cpu_limit,
+                "cpu_shares": cpu_shares,
                 "memory_usage": memory_stats.get("usage", 0),
-                "memory_limit": memory_stats.get("limit", 0) or docker_api.info()["MemTotal"],
+                "memory_limit": memory_limit,
                 "network_rx": networks["rx_bytes"],
                 "network_tx": networks["tx_bytes"],
                 "io_read": io_read,
@@ -72,8 +108,11 @@ def get_container_stats(container):
                 "name": container_name,
                 "status": container_status,
                 "cpu_percent": 0.0,
+                "cpu_count": 0,
+                "cpu_limit": cpu_limit,
+                "cpu_shares": cpu_shares,
                 "memory_usage": 0,
-                "memory_limit": docker_api.info()["MemTotal"],
+                "memory_limit": 0,
                 "network_rx": 0,
                 "network_tx": 0,
                 "io_read": 0,
@@ -86,8 +125,11 @@ def get_container_stats(container):
             "name": container_name,
             "status": "error",
             "cpu_percent": 0.0,
+            "cpu_count": 0,
+            "cpu_limit": None,
+            "cpu_shares": None,
             "memory_usage": 0,
-            "memory_limit": docker_api.info()["MemTotal"],
+            "memory_limit": 0,
             "network_rx": 0,
             "network_tx": 0,
             "io_read": 0,

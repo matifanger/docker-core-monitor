@@ -9,6 +9,9 @@ export interface Stats {
     name: string;
     status: string;
     cpu_percent: number;
+    cpu_count?: number | null;
+    cpu_limit?: number | null;
+    cpu_shares?: number | null;
     memory_usage: number;
     memory_limit: number;
     network_rx: number;
@@ -16,8 +19,6 @@ export interface Stats {
     io_read: number;
     io_write: number;
     uptime: number;
-    cpu_limit?: number | null;
-    cpu_shares?: number | null;
 }
 
 export interface NetworkHistory {

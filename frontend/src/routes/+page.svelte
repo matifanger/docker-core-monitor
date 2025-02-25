@@ -77,7 +77,7 @@
     function formatBytes(bytes: number): string {
         if (bytes === 0) return "0 B";
         const k = 1024;
-        const sizes = ["B", "KB", "MB", "GB"];
+        const sizes = ["B", "KB", "MB", "GB", "TB"];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
         return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
     }
@@ -87,6 +87,36 @@
         const m = Math.floor((seconds % 3600) / 60);
         const s = Math.floor(seconds % 60);
         return `${h}h ${m}m ${s}s`;
+    }
+
+    // Normaliza el porcentaje de CPU para que no exceda el 100% por núcleo
+    function normalizeCpuPercent(percent: number, cores?: number): number {
+        // Si no hay información de cores, asumimos que es un solo núcleo
+        const maxPercent = 100 * (cores || 1);
+        // No limitamos el porcentaje, solo lo devolvemos tal cual
+        return percent;
+    }
+
+    // Formatea la información de CPU para mostrar
+    function formatCpuInfo(cpuPercent: number, cpuCount?: number | null, cpuLimit?: number | null): string {
+        let result = `${cpuPercent.toFixed(2)}%`;
+        if (cpuLimit) {
+            result += ` / ${cpuLimit.toFixed(1)} CPUs`;
+        } else if (cpuCount) {
+            result += ` (${cpuCount} CPUs)`;
+        }
+        return result;
+    }
+
+    // Determina la unidad adecuada para los valores de red en el gráfico
+    function getNetworkChartUnit(values: number[]): { divisor: number, unit: string } {
+        const max = Math.max(...values, 1); // Evitar división por cero
+        
+        if (max >= 1e12) return { divisor: 1e12, unit: 'TB' };
+        if (max >= 1e9) return { divisor: 1e9, unit: 'GB' };
+        if (max >= 1e6) return { divisor: 1e6, unit: 'MB' };
+        if (max >= 1e3) return { divisor: 1e3, unit: 'KB' };
+        return { divisor: 1, unit: 'B' };
     }
 
     $: groupedContainers = containers.reduce((acc: Record<string, Container[]>, container) => {
@@ -107,6 +137,7 @@
         .sort((a, b) => (b.stats.memory_usage || 0) - (a.stats.memory_usage || 0));
 
     $: totalCpuPercent = Object.values(stats).reduce((sum, stat) => sum + stat.cpu_percent, 0);
+    $: totalCpuCount = Object.values(stats).reduce((max, stat) => Math.max(max, stat.cpu_count || 0), 0);
     $: totalMemoryUsage = Object.values(stats).reduce((sum, stat) => sum + stat.memory_usage, 0);
     $: totalMemoryLimit = Math.max(...Object.values(stats).map(stat => stat.memory_limit || 0));
     $: totalNetworkRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
@@ -114,10 +145,11 @@
     $: totalIoRead = Object.values(stats).reduce((sum, stat) => sum + stat.io_read, 0);
     $: totalIoWrite = Object.values(stats).reduce((sum, stat) => sum + stat.io_write, 0);
 
-    $: groupTotals = Object.keys(groupedContainers).reduce((acc: Record<string, { cpu: number, memory: number, memoryLimit: number, networkRx: number, networkTx: number, ioRead: number, ioWrite: number }>, groupName) => {
-        const groupStats = groupedContainers[groupName].map(c => stats[c.id] || { cpu_percent: 0, memory_usage: 0, memory_limit: 0, network_rx: 0, network_tx: 0, io_read: 0, io_write: 0 });
+    $: groupTotals = Object.keys(groupedContainers).reduce((acc: Record<string, { cpu: number, cpuCount: number, memory: number, memoryLimit: number, networkRx: number, networkTx: number, ioRead: number, ioWrite: number }>, groupName) => {
+        const groupStats = groupedContainers[groupName].map(c => stats[c.id] || { cpu_percent: 0, cpu_count: 0, memory_usage: 0, memory_limit: 0, network_rx: 0, network_tx: 0, io_read: 0, io_write: 0 });
         acc[groupName] = {
             cpu: groupStats.reduce((sum, stat) => sum + stat.cpu_percent, 0),
+            cpuCount: Math.max(...groupStats.map(stat => stat.cpu_count || 0)),
             memory: groupStats.reduce((sum, stat) => sum + stat.memory_usage, 0),
             memoryLimit: Math.max(...groupStats.map(stat => stat.memory_limit || 0)),
             networkRx: groupStats.reduce((sum, stat) => sum + stat.network_rx, 0),
@@ -130,20 +162,23 @@
 
     // Datos para el gráfico de red
     $: if (networkChart) {
+        const allValues = [...networkHistory.rx, ...networkHistory.tx];
+        const { divisor, unit } = getNetworkChartUnit(allValues);
+        
         networkChart.data = {
             labels: Array.from({ length: 10 }, (_, i) => `T-${9 - i}`),
             datasets: [
                 {
-                    label: 'RX',
-                    data: networkHistory.rx,
+                    label: `RX (${unit})`,
+                    data: networkHistory.rx.map(v => v / divisor),
                     borderColor: '#00ffcc',
                     backgroundColor: 'rgba(0, 255, 204, 0.2)',
                     fill: true,
                     tension: 0.4,
                 },
                 {
-                    label: 'TX',
-                    data: networkHistory.tx,
+                    label: `TX (${unit})`,
+                    data: networkHistory.tx.map(v => v / divisor),
                     borderColor: '#ff007a',
                     backgroundColor: 'rgba(255, 0, 122, 0.2)',
                     fill: true,
@@ -157,7 +192,10 @@
             scales: {
                 y: {
                     beginAtZero: true,
-                    ticks: { color: '#fff' },
+                    ticks: { 
+                        color: '#fff',
+                        callback: (value: any) => `${value} ${unit}`
+                    },
                     grid: { color: 'rgba(255, 255, 255, 0.1)' }
                 },
                 x: {
@@ -169,7 +207,7 @@
                 legend: { labels: { color: '#fff' } },
                 tooltip: {
                     callbacks: {
-                        label: (context: any) => `${context.dataset.label}: ${formatBytes(context.raw)}`
+                        label: (context: any) => `${context.dataset.label}: ${formatBytes(context.raw * divisor)}`
                     }
                 }
             }
@@ -198,16 +236,20 @@
         <div class="mt-6 grid grid-cols-1 lg:grid-cols-2 gap-6 text-gray-300 font-mono text-sm">
             <div class="space-y-4">
                 <div>
-                    <p><IconCpu class="inline w-4 h-4 mr-1" />CPU: <span class="text-cyan-400">{totalCpuPercent.toFixed(2)}%</span></p>
+                    <p><IconCpu class="inline w-4 h-4 mr-1" />CPU: <span class="text-cyan-400">{formatCpuInfo(totalCpuPercent, totalCpuCount, null)}</span></p>
                     <div class="w-full bg-gray-800 h-3 rounded-full mt-1 relative overflow-hidden">
                         <div class="bg-cyan-500 h-full rounded-full transition-all duration-500 animate-pulse" style="width: {Math.min(totalCpuPercent, 100)}%;"></div>
                         <div class="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent animate-flow"></div>
                     </div>
                 </div>
                 <div>
-                    <p><IconMemory class="inline w-4 h-4 mr-1" />Memory: <span class="text-cyan-400">{formatBytes(totalMemoryUsage)}</span> / <span class="text-purple-400">{formatBytes(totalMemoryLimit)}</span></p>
+                    <p><IconMemory class="inline w-4 h-4 mr-1" />Memory: <span class="text-cyan-400">{formatBytes(totalMemoryUsage)}</span>
+                    {#if totalMemoryLimit > 0}
+                     / <span class="text-purple-400">{formatBytes(totalMemoryLimit)}</span>
+                    {/if}
+                    </p>
                     <div class="w-full bg-gray-800 h-3 rounded-full mt-1 relative overflow-hidden">
-                        <div class="bg-cyan-500 h-full rounded-full transition-all duration-500 animate-pulse" style="width: {((totalMemoryUsage / totalMemoryLimit) * 100).toFixed(1)}%;"></div>
+                        <div class="bg-cyan-500 h-full rounded-full transition-all duration-500 animate-pulse" style="width: {totalMemoryLimit > 0 ? ((totalMemoryUsage / totalMemoryLimit) * 100).toFixed(1) : 0}%;"></div>
                         <div class="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent animate-flow"></div>
                     </div>
                 </div>
@@ -237,9 +279,11 @@
                             {groupName}
                         </h2>
                         <div class="hidden md:flex space-x-4 text-sm text-gray-300 font-mono">
-                            <span>CPU: <span class="text-cyan-400">{groupTotals[groupName]?.cpu.toFixed(2)}%</span></span>
+                            <span>CPU: <span class="text-cyan-400">{formatCpuInfo(groupTotals[groupName]?.cpu, groupTotals[groupName]?.cpuCount, null)}</span></span>
                             <span>MEM: <span class="text-cyan-400">{formatBytes(groupTotals[groupName]?.memory)}</span></span>
+                            {#if groupTotals[groupName]?.memoryLimit > 0 && groupTotals[groupName]?.memoryLimit !== groupTotals[groupName]?.memory}
                             <span>LIM: <span class="text-purple-400">{formatBytes(groupTotals[groupName]?.memoryLimit)}</span></span>
+                            {/if}
                             <span>RX: <span class="text-cyan-400">{formatBytes(groupTotals[groupName]?.networkRx)}</span></span>
                             <span>TX: <span class="text-cyan-400">{formatBytes(groupTotals[groupName]?.networkTx)}</span></span>
                         </div>
@@ -270,9 +314,9 @@
                                     <div class="mt-4 space-y-3 animate-fade-in">
                                         <div>
                                             <p class="text-sm text-gray-300 font-mono">
-                                                <IconCpu class="inline w-4 h-4 mr-1" />CPU: <span class="text-cyan-400">{stats[container.id].cpu_percent.toFixed(2)}%</span>
-                                                {#if stats[container.id].cpu_limit || stats[container.id].cpu_shares}
-                                                    <span class="text-yellow-400 ml-2">(Limited: {stats[container.id].cpu_limit ? `${stats[container.id].cpu_limit} CPUs` : `${stats[container.id].cpu_shares} shares`})</span>
+                                                <IconCpu class="inline w-4 h-4 mr-1" />CPU: <span class="text-cyan-400">{formatCpuInfo(stats[container.id].cpu_percent, stats[container.id].cpu_count, stats[container.id].cpu_limit)}</span>
+                                                {#if stats[container.id].cpu_shares}
+                                                    <span class="text-yellow-400 ml-2">(Shares: {stats[container.id].cpu_shares})</span>
                                                 {/if}
                                             </p>
                                             <div class="w-full bg-gray-800 h-2 rounded-full mt-1 relative overflow-hidden">
@@ -282,10 +326,13 @@
                                         </div>
                                         <div>
                                             <p class="text-sm text-gray-300 font-mono">
-                                                <IconMemory class="inline w-4 h-4 mr-1" />MEM: <span class="text-cyan-400">{formatBytes(stats[container.id].memory_usage)}</span> / <span class="text-purple-400">{formatBytes(stats[container.id].memory_limit)}</span>
+                                                <IconMemory class="inline w-4 h-4 mr-1" />MEM: <span class="text-cyan-400">{formatBytes(stats[container.id].memory_usage)}</span>
+                                                {#if stats[container.id].memory_limit && stats[container.id].memory_limit > 0 && stats[container.id].memory_limit !== stats[container.id].memory_usage}
+                                                 / <span class="text-purple-400">{formatBytes(stats[container.id].memory_limit)}</span>
+                                                {/if}
                                             </p>
                                             <div class="w-full bg-gray-800 h-2 rounded-full mt-1 relative overflow-hidden">
-                                                <div class="bg-cyan-500 h-full rounded-full transition-all duration-500 animate-pulse" style="width: {((stats[container.id].memory_usage / stats[container.id].memory_limit) * 100).toFixed(1)}%;"></div>
+                                                <div class="bg-cyan-500 h-full rounded-full transition-all duration-500 animate-pulse" style="width: {stats[container.id].memory_limit > 0 ? ((stats[container.id].memory_usage / stats[container.id].memory_limit) * 100).toFixed(1) : 0}%;"></div>
                                                 <div class="absolute inset-0 bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent animate-flow"></div>
                                             </div>
                                         </div>
@@ -322,12 +369,16 @@
                         <h3 class="text-lg font-mono text-white truncate">{container.name}</h3>
                     </div>
                     <div class="text-sm text-gray-300 font-mono flex flex-wrap gap-4 md:gap-6">
-                        <span><IconCpu class="inline w-4 h-4 mr-1" />{container.stats.cpu_percent?.toFixed(2) || 0}% 
-                            {#if container.stats.cpu_limit || container.stats.cpu_shares}
-                                <span class="text-yellow-400">({container.stats.cpu_limit ? `${container.stats.cpu_limit} CPUs` : `${container.stats.cpu_shares} shares`})</span>
+                        <span><IconCpu class="inline w-4 h-4 mr-1" />{formatCpuInfo(container.stats.cpu_percent || 0, container.stats.cpu_count, container.stats.cpu_limit)}
+                            {#if container.stats.cpu_shares}
+                                <span class="text-yellow-400">(Shares: {container.stats.cpu_shares})</span>
                             {/if}
                         </span>
-                        <span><IconMemory class="inline w-4 h-4 mr-1" />{formatBytes(container.stats.memory_usage || 0)} / {formatBytes(container.stats.memory_limit || 0)}</span>
+                        <span><IconMemory class="inline w-4 h-4 mr-1" />{formatBytes(container.stats.memory_usage || 0)}
+                        {#if container.stats.memory_limit && container.stats.memory_limit > 0 && container.stats.memory_limit !== container.stats.memory_usage}
+                         / {formatBytes(container.stats.memory_limit || 0)}
+                        {/if}
+                        </span>
                         <span>RX: {formatBytes(container.stats.network_rx || 0)}</span>
                         <span>TX: {formatBytes(container.stats.network_tx || 0)}</span>
                         <span>I/O: {formatBytes(container.stats.io_read || 0)}/{formatBytes(container.stats.io_write || 0)}</span>
