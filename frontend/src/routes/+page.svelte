@@ -11,8 +11,29 @@
     import IconClock from '~icons/mdi/clock';
     import IconGrid from '~icons/mdi/grid';
     import IconList from '~icons/mdi/format-list-bulleted';
+    import IconSort from '~icons/mdi/sort';
+    import IconSortAsc from '~icons/mdi/sort-ascending';
+    import IconSortDesc from '~icons/mdi/sort-descending';
+    import IconName from '~icons/mdi/alphabetical';
     // Gráfico
     import { Chart } from 'chart.js/auto';
+
+    // Click outside directive
+    function clickOutside(node: HTMLElement, callback: () => void) {
+        function handleClick(event: MouseEvent) {
+            if (node && !node.contains(event.target as Node) && !event.defaultPrevented) {
+                callback();
+            }
+        }
+        
+        document.addEventListener('click', handleClick, true);
+        
+        return {
+            destroy() {
+                document.removeEventListener('click', handleClick, true);
+            }
+        };
+    }
 
     const API_URL = env.PUBLIC_API_URL ?? 'http://localhost:5000';
     const SOCKET_URL = env.PUBLIC_SOCKET_URL ?? 'http://localhost:5000';
@@ -24,6 +45,26 @@
     let networkHistory: NetworkHistory = { rx: [], tx: [] };
     let viewMode: "groups" | "list" = "groups";
     let systemInfo: { MemTotal: number, NCPU: number } = { MemTotal: 0, NCPU: 0 };
+    
+    // Sort options
+    type SortField = "memory" | "cpu" | "name" | "network_rx" | "network_tx" | "io_read" | "io_write" | "uptime" | "status";
+    type SortDirection = "asc" | "desc";
+    
+    let sortField: SortField = "memory";
+    let sortDirection: SortDirection = "desc";
+    let showSortOptions = false;
+
+    const sortOptions: {field: SortField, label: string, icon: any}[] = [
+        { field: "memory", label: "Memory Usage", icon: IconMemory },
+        { field: "cpu", label: "CPU Usage", icon: IconCpu },
+        { field: "name", label: "Name", icon: IconName },
+        { field: "network_rx", label: "Network RX", icon: IconNetwork },
+        { field: "network_tx", label: "Network TX", icon: IconNetwork },
+        { field: "io_read", label: "I/O Read", icon: IconHardDrive },
+        { field: "io_write", label: "I/O Write", icon: IconHardDrive },
+        { field: "uptime", label: "Uptime", icon: IconClock },
+        { field: "status", label: "Status", icon: IconClock }
+    ];
 
     let networkChart: Chart;
 
@@ -35,10 +76,73 @@
     async function startMonitoring() {
         await fetch(`${API_URL}/start`);
     }
+    
+    function setSortOption(field: SortField) {
+        if (sortField === field) {
+            // Toggle direction if same field
+            sortDirection = sortDirection === "asc" ? "desc" : "asc";
+        } else {
+            sortField = field;
+            // Default directions based on field type
+            if (field === "name" || field === "status") {
+                sortDirection = "asc";
+            } else {
+                sortDirection = "desc";
+            }
+        }
+        
+        // Save to localStorage
+        try {
+            localStorage.setItem("dockerCoreSort", JSON.stringify({ field: sortField, direction: sortDirection }));
+        } catch (e) {
+            console.error("Failed to save sort preferences", e);
+        }
+        
+        // Close dropdown with a small delay to avoid flickering
+        setTimeout(() => {
+            showSortOptions = false;
+        }, 100);
+    }
 
     onMount(() => {
         fetchContainers();
         startMonitoring();
+        
+        // Load sort preferences from localStorage
+        try {
+            const savedSort = localStorage.getItem("dockerCoreSort");
+            if (savedSort) {
+                const { field, direction } = JSON.parse(savedSort);
+                sortField = field;
+                sortDirection = direction;
+            }
+        } catch (e) {
+            console.error("Failed to load sort preferences", e);
+        }
+        
+        // Load view mode from localStorage
+        try {
+            const savedViewMode = localStorage.getItem("dockerCoreViewMode");
+            if (savedViewMode) {
+                viewMode = savedViewMode as "groups" | "list";
+            }
+        } catch (e) {
+            console.error("Failed to load view mode", e);
+        }
+
+        // Add document click handler to close dropdown
+        const handleDocumentClick = (e: MouseEvent) => {
+            const sortButton = document.querySelector('.sort-button');
+            const sortDropdown = document.querySelector('.sort-dropdown');
+            
+            if (showSortOptions && sortButton && sortDropdown) {
+                if (!sortButton.contains(e.target as Node) && !sortDropdown.contains(e.target as Node)) {
+                    showSortOptions = false;
+                }
+            }
+        };
+        
+        document.addEventListener('click', handleDocumentClick);
 
         const canvas = document.getElementById('networkChart') as HTMLCanvasElement;
         networkChart = new Chart(canvas, {
@@ -68,6 +172,7 @@
             socket.disconnect();
             if (intervalId) clearInterval(intervalId);
             if (networkChart) networkChart.destroy();
+            document.removeEventListener('click', handleDocumentClick);
         };
     });
 
@@ -134,9 +239,62 @@
         return bRunning - aRunning; // Corregido el sort con valores numéricos
     });
 
-    $: sortedByRam = (containers || [])
+    $: sortedContainers = (containers || [])
         .map(c => ({ ...c, stats: stats?.[c.id] || {} }))
-        .sort((a, b) => (b.stats.memory_usage || 0) - (a.stats.memory_usage || 0));
+        .sort((a, b) => {
+            // Get values based on sort field
+            let aValue, bValue;
+            
+            switch (sortField) {
+                case "memory":
+                    aValue = a.stats.memory_usage || 0;
+                    bValue = b.stats.memory_usage || 0;
+                    break;
+                case "cpu":
+                    aValue = a.stats.cpu_percent || 0;
+                    bValue = b.stats.cpu_percent || 0;
+                    break;
+                case "name":
+                    aValue = a.name.toLowerCase();
+                    bValue = b.name.toLowerCase();
+                    break;
+                case "network_rx":
+                    aValue = a.stats.network_rx || 0;
+                    bValue = b.stats.network_rx || 0;
+                    break;
+                case "network_tx":
+                    aValue = a.stats.network_tx || 0;
+                    bValue = b.stats.network_tx || 0;
+                    break;
+                case "io_read":
+                    aValue = a.stats.io_read || 0;
+                    bValue = b.stats.io_read || 0;
+                    break;
+                case "io_write":
+                    aValue = a.stats.io_write || 0;
+                    bValue = b.stats.io_write || 0;
+                    break;
+                case "uptime":
+                    aValue = a.stats.uptime || 0;
+                    bValue = b.stats.uptime || 0;
+                    break;
+                case "status":
+                    // Sort running containers first
+                    aValue = a.status === "running" ? 1 : 0;
+                    bValue = b.status === "running" ? 1 : 0;
+                    break;
+                default:
+                    aValue = a.stats.memory_usage || 0;
+                    bValue = b.stats.memory_usage || 0;
+            }
+            
+            // Apply sort direction
+            if (sortDirection === "asc") {
+                return aValue > bValue ? 1 : aValue < bValue ? -1 : 0;
+            } else {
+                return aValue < bValue ? 1 : aValue > bValue ? -1 : 0;
+            }
+        });
 
     $: totalCpuPercent = Object.values(stats || {}).reduce((sum, stat) => sum + stat.cpu_percent, 0);
     $: totalCpuCount = Object.values(stats || {}).reduce((max, stat) => Math.max(max, stat.cpu_count || 0), 0);
@@ -226,7 +384,15 @@
             </h1>
             <button
                 class="p-2 rounded-full bg-gray-800 text-cyan-400 hover:bg-cyan-600 transition-all cursor-pointer"
-                on:click={() => viewMode = viewMode === 'groups' ? 'list' : 'groups'}
+                on:click={() => {
+                    viewMode = viewMode === 'groups' ? 'list' : 'groups';
+                    // Save view mode to localStorage
+                    try {
+                        localStorage.setItem("dockerCoreViewMode", viewMode);
+                    } catch (e) {
+                        console.error("Failed to save view mode", e);
+                    }
+                }}
             >
                 {#if viewMode === 'groups'}
                     <IconList class="w-6 h-6" />
@@ -359,32 +525,161 @@
         </div>
     {:else if viewMode === "list"}
         <div class="w-full max-w-7xl space-y-4">
-            <h2 class="text-2xl md:text-3xl font-display text-cyan-400 uppercase tracking-wider mb-4">All Containers (Sorted by RAM)</h2>
-            {#each sortedByRam as container}
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 gap-4">
+                <h2 class="text-2xl md:text-3xl font-display text-cyan-400 uppercase tracking-wider">
+                    All Containers
+                </h2>
+                
+                <div class="relative flex items-center gap-2">
+                    <button 
+                        class="sort-button flex items-center gap-2 px-4 py-2 bg-gray-800 rounded-lg text-cyan-400 hover:bg-gray-700 transition-colors"
+                        on:click={(e) => {
+                            e.stopPropagation();
+                            showSortOptions = !showSortOptions;
+                        }}
+                        title="Select sort field"
+                    >
+                        <span class="flex items-center gap-1">
+                            <svelte:component this={sortOptions.find(opt => opt.field === sortField)?.icon} class="w-5 h-5 mr-1" />
+                            Sort: {sortOptions.find(opt => opt.field === sortField)?.label}
+                        </span>
+                    </button>
+                    
+                    <button 
+                        class="p-2.5 bg-gray-800 rounded-lg text-cyan-400 hover:bg-gray-700 hover:text-white transition-colors"
+                        on:click={(e) => {
+                            e.stopPropagation();
+                            sortDirection = sortDirection === "asc" ? "desc" : "asc";
+                            // Save to localStorage
+                            try {
+                                localStorage.setItem("dockerCoreSort", JSON.stringify({ field: sortField, direction: sortDirection }));
+                            } catch (e) {
+                                console.error("Failed to save sort preferences", e);
+                            }
+                        }}
+                        title={sortDirection === "asc" ? "Ascending" : "Descending"}
+                    >
+                        {#if sortDirection === "asc"}
+                            <IconSortAsc class="w-5 h-5" />
+                        {:else}
+                            <IconSortDesc class="w-5 h-5" />
+                        {/if}
+                    </button>
+                    
+                    {#if showSortOptions}
+                        <div 
+                            class="sort-dropdown absolute right-0 top-full mt-2 w-64 bg-gray-800 rounded-lg shadow-lg z-10 py-2 border border-gray-700 animate-fade-in"
+                            style="min-width: 100%;"
+                            use:clickOutside={() => showSortOptions = false}
+                        >
+                            {#each sortOptions as option}
+                                <button 
+                                    class="w-full px-4 py-2 text-left hover:bg-gray-700 flex items-center gap-2 transition-colors {sortField === option.field ? 'text-cyan-400' : 'text-gray-300'}"
+                                    on:click={(e) => {
+                                        e.stopPropagation();
+                                        setSortOption(option.field);
+                                    }}
+                                >
+                                    <svelte:component this={option.icon} class="w-5 h-5" />
+                                    {option.label}
+                                    {#if sortField === option.field}
+                                        <span class="ml-auto text-cyan-400">✓</span>
+                                    {/if}
+                                </button>
+                            {/each}
+                        </div>
+                    {/if}
+                </div>
+            </div>
+            
+            {#each sortedContainers as container}
                 <div
                     class="bg-gray-900/70 border border-gray-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between hover:border-cyan-500/70 transition-all duration-500 hover:shadow-[0_0_20px_rgba(0,255,204,0.3)] gap-4"
                 >
                     <div class="flex items-center space-x-4">
                         <div
-                            class="w-3 h-3 rounded-full {container.status === 'running' ? 'bg-green-400 animate-subtle-pulse' : 'bg-red-500'}"
+                            class="w-3 h-3 rounded-full {container.status === 'running' ? 'bg-green-400 animate-subtle-pulse' : 'bg-red-500'} {sortField === 'status' ? 'ring-2 ring-cyan-400 ring-offset-1 ring-offset-gray-900' : ''}"
                         ></div>
-                        <h3 class="text-lg font-mono text-white truncate">{container.name}</h3>
+                        <h3 class="text-lg font-mono {sortField === 'name' ? 'text-cyan-400' : 'text-white'} truncate">
+                            {container.name}
+                            {#if sortField === "name"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
+                        </h3>
                     </div>
                     <div class="text-sm text-gray-300 font-mono flex flex-wrap gap-4 md:gap-6">
-                        <span><IconCpu class="inline w-4 h-4 mr-1" />{formatCpuInfo(container.stats?.cpu_percent || 0, container.stats?.cpu_count, container.stats?.cpu_limit)}
+                        <span class={sortField === "cpu" ? "text-cyan-400" : ""}>
+                            <IconCpu class="inline w-4 h-4 mr-1" />
+                            {formatCpuInfo(container.stats?.cpu_percent || 0, container.stats?.cpu_count, container.stats?.cpu_limit)}
                             {#if container.stats?.cpu_shares}
                                 <span class="text-yellow-400">(Shares: {container.stats.cpu_shares})</span>
                             {/if}
+                            {#if sortField === "cpu"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
                         </span>
-                        <span><IconMemory class="inline w-4 h-4 mr-1" />{formatBytes(container.stats?.memory_usage || 0)}
-                        {#if container.stats?.memory_limit && container.stats?.memory_limit > 0 && container.stats?.memory_limit !== container.stats?.memory_usage}
-                         / {formatBytes(container.stats?.memory_limit || 0)}
-                        {/if}
+                        <span class={sortField === "memory" ? "text-cyan-400" : ""}>
+                            <IconMemory class="inline w-4 h-4 mr-1" />
+                            {formatBytes(container.stats?.memory_usage || 0)}
+                            {#if container.stats?.memory_limit && container.stats?.memory_limit > 0 && container.stats?.memory_limit !== container.stats?.memory_usage}
+                             / {formatBytes(container.stats?.memory_limit || 0)}
+                            {/if}
+                            {#if sortField === "memory"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
                         </span>
-                        <span>RX: {formatBytes(container.stats?.network_rx || 0)}</span>
-                        <span>TX: {formatBytes(container.stats?.network_tx || 0)}</span>
-                        <span>I/O: {formatBytes(container.stats?.io_read || 0)}/{formatBytes(container.stats?.io_write || 0)}</span>
-                        <span>{formatTime(container.stats?.uptime || 0)}</span>
+                        <span class={sortField === "network_rx" ? "text-cyan-400" : ""}>
+                            RX: {formatBytes(container.stats?.network_rx || 0)}
+                            {#if sortField === "network_rx"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
+                        </span>
+                        <span class={sortField === "network_tx" ? "text-cyan-400" : ""}>
+                            TX: {formatBytes(container.stats?.network_tx || 0)}
+                            {#if sortField === "network_tx"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
+                        </span>
+                        <span class={sortField === "io_read" || sortField === "io_write" ? "text-cyan-400" : ""}>
+                            I/O: {formatBytes(container.stats?.io_read || 0)}/{formatBytes(container.stats?.io_write || 0)}
+                            {#if sortField === "io_read" || sortField === "io_write"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
+                        </span>
+                        <span class={sortField === "uptime" ? "text-cyan-400" : ""}>
+                            {formatTime(container.stats?.uptime || 0)}
+                            {#if sortField === "uptime"}
+                                {#if sortDirection === "asc"}
+                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                {:else}
+                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                {/if}
+                            {/if}
+                        </span>
                     </div>
                 </div>
             {/each}
