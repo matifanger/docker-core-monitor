@@ -11,4 +11,7 @@ export default defineConfig({
 			compiler: 'svelte',
 		}),
 	],
+	preview: {
+		allowedHosts: ['*'],
+	}
 });
