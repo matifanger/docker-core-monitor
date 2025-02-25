@@ -1,0 +1,34 @@
+# Git
+.git
+.github
+.gitignore
+
+# Docker
+Dockerfile*
+docker-compose.yml
+.dockerignore
+
+# Node.js (for frontend)
+frontend/node_modules
+frontend/.svelte-kit
+frontend/build
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+
+# Documentation
+*.md
+!README.md 

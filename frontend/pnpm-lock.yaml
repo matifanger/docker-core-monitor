@@ -14,9 +14,6 @@ importers:
       socket.io-client:
         specifier: ^4.8.1
         version: 4.8.1
-      svelte-chartjs:
-        specifier: ^3.1.5
-        version: 3.1.5(chart.js@4.4.8)(svelte@5.20.2)
     devDependencies:
       '@eslint/compat':
         specifier: ^1.2.5
@@ -1237,12 +1234,6 @@ packages:
   supports-color@7.2.0:
     resolution: {integrity: sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==}
     engines: {node: '>=8'}
-
-  svelte-chartjs@3.1.5:
-    resolution: {integrity: sha512-ka2zh7v5FiwfAX1oMflZ0HkNkgjHjFqANgRyC+vNYXfxtx2ku68Zo+2KgbKeBH2nS1ThDqkIACPzGxy4T0UaoA==}
-    peerDependencies:
-      chart.js: ^3.5.0 || ^4.0.0
-      svelte: ^4.0.0
 
   svelte-check@4.1.4:
     resolution: {integrity: sha512-v0j7yLbT29MezzaQJPEDwksybTE2Ups9rUxEXy92T06TiA0cbqcO8wAOwNUVkFW6B0hsYHA+oAX3BS8b/2oHtw==}
@@ -2509,11 +2500,6 @@ snapshots:
   supports-color@7.2.0:
     dependencies:
       has-flag: 4.0.0
-
-  svelte-chartjs@3.1.5(chart.js@4.4.8)(svelte@5.20.2):
-    dependencies:
-      chart.js: 4.4.8
-      svelte: 5.20.2
 
   svelte-check@4.1.4(svelte@5.20.2)(typescript@5.7.3):
     dependencies:

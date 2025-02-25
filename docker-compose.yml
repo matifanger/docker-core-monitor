@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: docker-monitor-backend
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "5000:5000"
+    restart: unless-stopped
+    networks:
+      - monitor-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.frontend
+    container_name: docker-monitor-frontend
+    ports:
+      - "4173:4173"
+    environment:
+      - PUBLIC_API_URL=http://localhost:5000
+      - PUBLIC_SOCKET_URL=http://localhost:5000
+      - PUBLIC_REFRESH_INTERVAL=10000
+    depends_on:
+      - backend
+    restart: unless-stopped
+    networks:
+      - monitor-network
+
+networks:
+  monitor-network:
+    driver: bridge

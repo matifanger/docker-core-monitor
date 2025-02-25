@@ -1,0 +1,27 @@
+# Node.js
+node_modules
+.svelte-kit
+build
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Editor directories and files
+.idea
+.vscode
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log* 

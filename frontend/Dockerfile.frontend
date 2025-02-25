@@ -1,0 +1,29 @@
+FROM node:20-slim
+
+WORKDIR /app
+
+# Install pnpm
+RUN npm install -g pnpm
+
+# Copy package files
+COPY package.json pnpm-lock.yaml ./
+
+# Install dependencies
+RUN pnpm install
+
+# Copy the rest of the application
+COPY . .
+
+# Set environment variables with default values
+ENV PUBLIC_API_URL=http://localhost:5000
+ENV PUBLIC_SOCKET_URL=http://localhost:5000
+ENV PUBLIC_REFRESH_INTERVAL=10000
+
+# Build the application
+RUN pnpm build
+
+# Expose the port the app runs on
+EXPOSE 4173
+
+# Start the server using the preview command
+CMD ["pnpm", "preview", "--host", "0.0.0.0", "--port", "4173"] 
