@@ -14,11 +14,6 @@ RUN pnpm install
 # Copy the rest of the application
 COPY . .
 
-# Set environment variables with default values
-ENV PUBLIC_API_URL=http://localhost:5000
-ENV PUBLIC_SOCKET_URL=http://localhost:5000
-ENV PUBLIC_REFRESH_INTERVAL=10000
-
 # Build the application
 RUN pnpm build
 
