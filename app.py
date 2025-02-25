@@ -151,7 +151,18 @@ def fetch_container_stats():
 
             global container_stats
             container_stats = stats_data
-            socketio.emit("update_stats", container_stats)
+            
+            # Añadir información del sistema como metadatos
+            system_info = {
+                "MemTotal": docker_api.info()["MemTotal"],
+                "NCPU": docker_api.info()["NCPU"]
+            }
+            
+            # Enviar los datos en el formato esperado por el frontend
+            socketio.emit("update_stats", {
+                "containers": container_stats,
+                "system_info": system_info
+            })
         except Exception as e:
             print(f"Error in fetch_container_stats: {e}")
         time.sleep(2)
@@ -179,7 +190,17 @@ def get_containers():
 
 @socketio.on("connect")
 def handle_connect():
-    emit("update_stats", container_stats)
+    # Enviar también la información del sistema al conectar
+    system_info = {
+        "MemTotal": docker_api.info()["MemTotal"],
+        "NCPU": docker_api.info()["NCPU"]
+    }
+    
+    # Enviar los datos en el formato esperado por el frontend
+    emit("update_stats", {
+        "containers": container_stats,
+        "system_info": system_info
+    })
 
 # Start monitoring thread when app starts
 try:
