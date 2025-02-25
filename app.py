@@ -4,6 +4,8 @@ from flask_cors import CORS
 import docker
 import threading
 import time
+import platform
+import os
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -11,8 +13,13 @@ app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Create Docker client using the newer API
-docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
+# Create Docker client based on the operating system
+if platform.system() == 'Windows':
+    # For Windows, use the named pipe
+    docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
+else:
+    # For Unix-based systems, use the Unix socket
+    docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
 
 container_stats = {}
 
