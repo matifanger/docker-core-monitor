@@ -6,20 +6,49 @@ import threading
 import time
 import platform
 import os
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 CORS(app)
-socketio = SocketIO(app, cors_allowed_origins="*")
+
+# Determine the best available async mode
+async_mode = None
+try:
+    import eventlet
+    async_mode = 'eventlet'
+except ImportError:
+    try:
+        import gevent
+        async_mode = 'gevent'
+    except ImportError:
+        async_mode = 'threading'
+
+logger.info(f"Using async_mode: {async_mode}")
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=True, engineio_logger=True)
 
 # Create Docker client based on the operating system
-if platform.system() == 'Windows':
-    # For Windows, use the named pipe
-    docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
-else:
-    # For Unix-based systems, use the Unix socket
-    docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
+try:
+    if platform.system() == 'Windows':
+        # For Windows, use the named pipe
+        docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
+        logger.info("Connected to Docker using Windows named pipe")
+    else:
+        # For Unix-based systems, use the Unix socket
+        docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
+        logger.info("Connected to Docker using Unix socket")
+    
+    # Test connection
+    docker_api.ping()
+    logger.info(f"Docker connection successful. API version: {docker_api.version()['ApiVersion']}")
+except Exception as e:
+    logger.error(f"Failed to connect to Docker: {e}")
+    docker_api = None
 
 container_stats = {}
 
@@ -120,7 +149,7 @@ def get_container_stats(container):
                 "uptime": 0
             })
     except Exception as e:
-        print(f"Error fetching stats for {container_name}: {e}")
+        logger.error(f"Error fetching stats for {container_name}: {e}")
         return (container_id, {
             "name": container_name,
             "status": "error",
@@ -140,6 +169,11 @@ def get_container_stats(container):
 def fetch_container_stats():
     while True:
         try:
+            if docker_api is None:
+                logger.error("Docker API client is not initialized. Cannot fetch stats.")
+                time.sleep(5)  # Wait a bit longer when there's an error
+                continue
+                
             containers = docker_api.containers.list(all=True)
             stats_data = {}
             
@@ -152,19 +186,27 @@ def fetch_container_stats():
             global container_stats
             container_stats = stats_data
             
-            # Añadir información del sistema como metadatos
-            system_info = {
-                "MemTotal": docker_api.info()["MemTotal"],
-                "NCPU": docker_api.info()["NCPU"]
-            }
+            # Add system information as metadata
+            try:
+                system_info = {
+                    "MemTotal": docker_api.info()["MemTotal"],
+                    "NCPU": docker_api.info()["NCPU"]
+                }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+                system_info = {
+                    "MemTotal": 0,
+                    "NCPU": 0
+                }
             
-            # Enviar los datos en el formato esperado por el frontend
+            # Send the data in the format expected by the frontend
             socketio.emit("update_stats", {
                 "containers": container_stats,
                 "system_info": system_info
             })
+            logger.debug(f"Emitted stats for {len(container_stats)} containers")
         except Exception as e:
-            print(f"Error in fetch_container_stats: {e}")
+            logger.error(f"Error in fetch_container_stats: {e}")
         time.sleep(2)
 
 @app.route("/start", methods=["GET"])
@@ -178,6 +220,10 @@ def start_monitoring():
 @app.route("/containers", methods=["GET"])
 def get_containers():
     try:
+        if docker_api is None:
+            logger.error("Docker API client is not initialized. Cannot get containers.")
+            return jsonify({"error": "Docker API client is not initialized"}), 500
+            
         containers = docker_api.containers.list(all=True)
         return jsonify([{
             "id": c.id, 
@@ -185,31 +231,58 @@ def get_containers():
             "status": c.status
         } for c in containers])
     except Exception as e:
-        print(f"Error getting containers: {e}")
+        logger.error(f"Error getting containers: {e}")
         return jsonify({"error": str(e)}), 500
 
 @socketio.on("connect")
 def handle_connect():
-    # Enviar también la información del sistema al conectar
-    system_info = {
-        "MemTotal": docker_api.info()["MemTotal"],
-        "NCPU": docker_api.info()["NCPU"]
-    }
-    
-    # Enviar los datos en el formato esperado por el frontend
-    emit("update_stats", {
-        "containers": container_stats,
-        "system_info": system_info
-    })
+    try:
+        if docker_api is None:
+            system_info = {
+                "MemTotal": 0,
+                "NCPU": 0
+            }
+        else:
+            system_info = {
+                "MemTotal": docker_api.info()["MemTotal"],
+                "NCPU": docker_api.info()["NCPU"]
+            }
+        
+        # Send the data in the format expected by the frontend
+        emit("update_stats", {
+            "containers": container_stats,
+            "system_info": system_info
+        })
+        logger.info("Sent initial stats to new client connection")
+    except Exception as e:
+        logger.error(f"Error in handle_connect: {e}")
+        emit("error", {"message": "Failed to get system information"})
 
 # Start monitoring thread when app starts
 try:
     thread = threading.Thread(target=fetch_container_stats, daemon=True)
     thread.name = "stats_thread"
     thread.start()
-    print("Monitoring thread started successfully")
+    logger.info("Monitoring thread started successfully")
 except Exception as e:
-    print(f"Error starting monitoring thread: {e}")
+    logger.error(f"Error starting monitoring thread: {e}")
 
 if __name__ == "__main__":
+    if async_mode == 'eventlet':
+        try:
+            import eventlet
+            eventlet.monkey_patch()
+            logger.info("Starting server with eventlet")
+        except ImportError:
+            logger.warning("Eventlet import failed")
+    elif async_mode == 'gevent':
+        try:
+            from gevent import monkey
+            monkey.patch_all()
+            logger.info("Starting server with gevent")
+        except ImportError:
+            logger.warning("Gevent import failed")
+    else:
+        logger.info("Starting server with threading mode")
+    
     socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True)

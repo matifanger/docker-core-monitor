@@ -13,6 +13,9 @@ services:
     restart: unless-stopped
     networks:
       - monitor-network
+    environment:
+      - PYTHONUNBUFFERED=1
+      - HOST_IP=${HOST_IP:-localhost}
 
   frontend:
     build:
@@ -22,9 +25,9 @@ services:
     ports:
       - "4173:4173"
     environment:
-      - PUBLIC_API_URL=${PUBLIC_API_URL}
-      - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL}
-      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL}
+      - PUBLIC_API_URL=http://${HOST_IP:-localhost}:5000
+      - PUBLIC_SOCKET_URL=http://${HOST_IP:-localhost}:5000
+      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL:-10000}
     depends_on:
       - backend
     restart: unless-stopped
