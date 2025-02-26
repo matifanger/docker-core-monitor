@@ -1,38 +1,47 @@
+import os
+import time
+import json
+import logging
+import threading
+import platform
+import concurrent.futures
+from datetime import datetime
 from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import docker
-import threading
-import time
-import platform
-import os
-import logging
-import json
-from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
 
-# Configure logging - only errors and critical info
-logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-app = Flask(__name__)
-CORS(app)
-
-# Determine the best available async mode
-async_mode = None
+# Set up async mode for SocketIO
 try:
     import eventlet
     async_mode = 'eventlet'
 except ImportError:
     try:
         import gevent
+        from gevent.pywsgi import WSGIServer
         async_mode = 'gevent'
     except ImportError:
         async_mode = 'threading'
 
+# Apply monkey patching if using eventlet or gevent
+if async_mode == 'eventlet':
+    eventlet.monkey_patch()
+elif async_mode == 'gevent':
+    from gevent import monkey
+    monkey.patch_all()
+
+# Configure logging - only errors and critical info
+logging.basicConfig(level=logging.ERROR, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+CORS(app)
+
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
 
-# Create Docker client based on the operating system
+# Initialize Docker API client
+docker_api = None
 try:
     if platform.system() == 'Windows':
         # For Windows, use the named pipe
@@ -43,15 +52,21 @@ try:
     
     # Test connection
     docker_api.ping()
+    logger.info("Successfully connected to Docker API")
 except Exception as e:
-    logger.error(f"Failed to connect to Docker: {e}")
+    logger.error(f"Failed to initialize Docker API client: {e}")
     docker_api = None
 
 container_stats = {}
 
-# Custom names storage
-DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
-CUSTOM_NAMES_FILE = os.path.join(DATA_DIR, 'custom_names.json')
+# Global variables
+stats = {}
+custom_names = {"containers": {}, "groups": {}, "container_groups": {}}
+monitoring_thread_running = False
+
+# Constants
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+CUSTOM_NAMES_FILE = os.path.join(DATA_DIR, "custom_names.json")
 
 # Load custom names from file or initialize empty dict
 def load_custom_names():
@@ -81,14 +96,44 @@ custom_names = load_custom_names()
 
 def calculate_cpu_percent(stats):
     try:
-        cpu_count = stats["cpu_stats"]["online_cpus"]
-        cpu_delta = stats["cpu_stats"]["cpu_usage"]["total_usage"] - stats["precpu_stats"]["cpu_usage"]["total_usage"]
-        system_delta = stats["cpu_stats"]["system_cpu_usage"] - stats["precpu_stats"]["system_cpu_usage"]
+        cpu_stats = stats.get("cpu_stats", {})
+        precpu_stats = stats.get("precpu_stats", {})
+        
+        # Check if we have the required fields
+        if not cpu_stats or not precpu_stats:
+            return 0.0
+            
+        cpu_total_usage = cpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+        precpu_total_usage = precpu_stats.get("cpu_usage", {}).get("total_usage", 0)
+        
+        # If we don't have valid usage data, return 0
+        if not cpu_total_usage or not precpu_total_usage:
+            return 0.0
+            
+        cpu_system_usage = cpu_stats.get("system_cpu_usage", 0)
+        precpu_system_usage = precpu_stats.get("system_cpu_usage", 0)
+        
+        # If we don't have valid system usage data, return 0
+        if not cpu_system_usage or not precpu_system_usage:
+            return 0.0
+            
+        # Get number of CPUs
+        cpu_count = cpu_stats.get("online_cpus", 0)
+        if cpu_count == 0:
+            # Fallback to number of CPUs in the system
+            cpu_count = 1
+        
+        # Calculate CPU delta values
+        cpu_delta = cpu_total_usage - precpu_total_usage
+        system_delta = cpu_system_usage - precpu_system_usage
+        
         if system_delta > 0 and cpu_delta > 0:
-            # Calcular el porcentaje real sin multiplicar por cpu_count
-            return (cpu_delta / system_delta) * 100.0
-        return 0.0
-    except KeyError:
+            cpu_percent = (cpu_delta / system_delta) * cpu_count * 100.0
+            return round(cpu_percent, 2)
+        else:
+            return 0.0
+    except Exception as e:
+        logger.error(f"Error calculating CPU percent: {e}")
         return 0.0
 
 def get_container_stats(container):
@@ -132,29 +177,60 @@ def get_container_stats(container):
         
         if container_status == "running":
             stats = container.stats(stream=False)
-            memory_stats = stats.get("memory_stats", {})
-            networks = stats.get("networks", {}).get("eth0", {"rx_bytes": 0, "tx_bytes": 0})
-            blkio = stats.get("blkio_stats", {}).get("io_service_bytes_recursive", [])
-            io_read = sum(b["value"] for b in blkio if b["op"] == "Read") or 0
-            io_write = sum(b["value"] for b in blkio if b["op"] == "Write") or 0
             
+            # Check if stats is None or doesn't have required fields
+            if not stats:
+                logger.error(f"No stats available for container {container_name}")
+                raise ValueError("No stats available")
+                
+            # Get memory stats with safe fallbacks
+            memory_stats = stats.get("memory_stats", {})
+            
+            # Get network stats with safe fallbacks
+            networks = stats.get("networks", {})
+            network_stats = networks.get("eth0", {}) if networks else {}
+            rx_bytes = network_stats.get("rx_bytes", 0)
+            tx_bytes = network_stats.get("tx_bytes", 0)
+            
+            # Get block IO stats with safe fallbacks
+            blkio_stats = stats.get("blkio_stats", {})
+            io_service_bytes = blkio_stats.get("io_service_bytes_recursive", [])
+            
+            # Check if io_service_bytes is None before iterating
+            if io_service_bytes is None:
+                io_read = 0
+                io_write = 0
+            else:
+                io_read = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Read")
+                io_write = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Write")
+            
+            # Check for CPU stats
+            cpu_stats = stats.get("cpu_stats", {})
+            precpu_stats = stats.get("precpu_stats", {})
+            
+            # Safe CPU calculation
+            if "online_cpus" in cpu_stats:
+                cpu_count = cpu_stats.get("online_cpus", 0)
+            else:
+                cpu_count = 0
+                
             # Verificar si hay un límite de memoria real
             memory_limit = memory_stats.get("limit", 0)
             # Si el límite es igual al total del host, consideramos que no hay límite
-            if memory_limit == docker_api.info()["MemTotal"]:
+            if docker_api and memory_limit == docker_api.info().get("MemTotal", 0):
                 memory_limit = 0
                 
             return (container_id, {
                 "name": container_name,
                 "status": container_status,
-                "cpu_percent": calculate_cpu_percent(stats),
-                "cpu_count": stats["cpu_stats"]["online_cpus"],
+                "cpu_percent": calculate_cpu_percent(stats) if cpu_stats and precpu_stats else 0.0,
+                "cpu_count": cpu_count,
                 "cpu_limit": cpu_limit,
                 "cpu_shares": cpu_shares,
                 "memory_usage": memory_stats.get("usage", 0),
                 "memory_limit": memory_limit,
-                "network_rx": networks["rx_bytes"],
-                "network_tx": networks["tx_bytes"],
+                "network_rx": rx_bytes,
+                "network_tx": tx_bytes,
                 "io_read": io_read,
                 "io_write": io_write,
                 "uptime": uptime
@@ -194,65 +270,56 @@ def get_container_stats(container):
         })
 
 def fetch_container_stats():
-    while True:
-        try:
-            if docker_api is None:
-                logger.error("Docker API client is not initialized. Cannot fetch stats.")
-                time.sleep(5)  # Wait a bit longer when there's an error
-                continue
-                
-            containers = docker_api.containers.list(all=True)
-            stats_data = {}
+    global stats
+    try:
+        if docker_api is None:
+            logger.error("Docker API client is not initialized. Cannot fetch stats.")
+            return {}
             
-            with ThreadPoolExecutor(max_workers=10) as executor:
-                futures = {executor.submit(get_container_stats, c): c for c in containers}
-                for future in futures:
-                    container_id, stat = future.result()
-                    # Apply custom container name if exists
-                    if container_id in custom_names["containers"]:
-                        stat["name"] = custom_names["containers"][container_id]
-                    stats_data[container_id] = stat
-
-            global container_stats
-            container_stats = stats_data
-            
-            # Add system information as metadata
-            try:
-                system_info = {
-                    "MemTotal": docker_api.info()["MemTotal"],
-                    "NCPU": docker_api.info()["NCPU"]
-                }
-            except Exception as e:
-                logger.error(f"Error getting system info: {e}")
-                system_info = {
-                    "MemTotal": 0,
-                    "NCPU": 0
-                }
-            
-            # Send the data in the format expected by the frontend
-            socketio.emit("update_stats", {
-                "containers": container_stats,
-                "system_info": system_info,
-                "custom_names": custom_names
-            })
-        except Exception as e:
-            logger.error(f"Error in fetch_container_stats: {e}")
-        time.sleep(2)
+        containers = docker_api.containers.list(all=True)
+        
+        # Get stats for each container in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            container_stats = list(executor.map(get_container_stats, containers))
+        
+        # Convert to dictionary
+        stats_dict = {}
+        for container_id, container_stats in container_stats:
+            if container_stats["status"] != "error":  # Skip containers with errors
+                stats_dict[container_id] = container_stats
+        
+        # Apply custom names if they exist
+        for container_id, container_stats in stats_dict.items():
+            if container_id in custom_names["containers"]:
+                container_stats["name"] = custom_names["containers"][container_id]
+        
+        stats = stats_dict
+        return stats
+    except Exception as e:
+        logger.error(f"Error fetching container stats: {e}")
+        return {}
 
 @app.route("/start", methods=["GET"])
 def start_monitoring():
-    thread = threading.Thread(target=fetch_container_stats, daemon=True)
-    if not any(t.name == "stats_thread" for t in threading.enumerate()):
-        thread.name = "stats_thread"
+    global monitoring_thread_running
+    
+    if docker_api is None:
+        return jsonify({"status": "error", "message": "Docker API client is not initialized"}), 500
+        
+    if not monitoring_thread_running:
+        monitoring_thread_running = True
+        thread = threading.Thread(target=monitoring_thread)
+        thread.daemon = True
         thread.start()
-    return jsonify({"message": "Monitoring started"})
+        
+    return jsonify({"status": "ok"})
 
 @app.route("/containers", methods=["GET"])
 def get_containers():
     try:
         if docker_api is None:
             logger.error("Docker API client is not initialized. Cannot get containers.")
-            return jsonify({"error": "Docker API client is not initialized"}), 500
+            return jsonify({"error": "Docker API client is not initialized. Please make sure Docker is running and accessible."}), 500
             
         containers = docker_api.containers.list(all=True)
         container_list = []
@@ -292,8 +359,8 @@ def update_container_name(container_id):
         save_custom_names(custom_names)
         
         # Update stats with new name
-        if container_id in container_stats:
-            container_stats[container_id]["name"] = data["name"]
+        if container_id in stats:
+            stats[container_id]["name"] = data["name"]
             
         return jsonify({"success": True, "message": "Container name updated"})
     except Exception as e:
@@ -374,47 +441,98 @@ def reset_container_group(container_id):
 @socketio.on("connect")
 def handle_connect():
     try:
-        if docker_api is None:
-            system_info = {
-                "MemTotal": 0,
-                "NCPU": 0
-            }
-        else:
-            system_info = {
-                "MemTotal": docker_api.info()["MemTotal"],
-                "NCPU": docker_api.info()["NCPU"]
-            }
+        # Send initial stats to new client
+        current_stats = {}
+        if docker_api is not None:
+            current_stats = fetch_container_stats()
         
-        # Send the data in the format expected by the frontend
+        # Get system info
+        system_info = {"MemTotal": 0, "NCPU": 0}
+        if docker_api is not None:
+            try:
+                system_info = {
+                    "MemTotal": docker_api.info().get("MemTotal", 0),
+                    "NCPU": docker_api.info().get("NCPU", 0)
+                }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+        
+        # Send initial data
         emit("update_stats", {
-            "containers": container_stats,
+            "containers": current_stats,
             "system_info": system_info,
             "custom_names": custom_names
         })
+        
+        # Make sure monitoring thread is running
+        if docker_api is not None:
+            start_monitoring()
     except Exception as e:
-        logger.error(f"Error in handle_connect: {e}")
-        emit("error", {"message": "Failed to get system information"})
+        logger.error(f"Error handling socket connection: {e}")
+        emit("error", {"message": "Failed to get initial stats"})
+
+def monitoring_thread():
+    """Thread that continuously fetches container stats and emits them via Socket.IO"""
+    while True:
+        try:
+            if docker_api is None:
+                logger.error("Docker API client is not initialized. Cannot fetch stats.")
+                time.sleep(5)  # Wait a bit longer when there's an error
+                continue
+                
+            # Fetch container stats
+            stats_data = fetch_container_stats()
+            
+            # Add system information as metadata
+            try:
+                if docker_api:
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+                else:
+                    system_info = {
+                        "MemTotal": 0,
+                        "NCPU": 0
+                    }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+                system_info = {
+                    "MemTotal": 0,
+                    "NCPU": 0
+                }
+            
+            # Send the data in the format expected by the frontend
+            socketio.emit("update_stats", {
+                "containers": stats_data,
+                "system_info": system_info,
+                "custom_names": custom_names
+            })
+            
+            # Sleep for a bit before the next update
+            time.sleep(2)
+        except Exception as e:
+            logger.error(f"Error in monitoring thread: {e}")
+            time.sleep(2)
 
 # Start monitoring thread when app starts
 try:
-    thread = threading.Thread(target=fetch_container_stats, daemon=True)
-    thread.name = "stats_thread"
-    thread.start()
+    if docker_api is not None:
+        monitoring_thread_running = True
+        thread = threading.Thread(target=monitoring_thread)
+        thread.daemon = True
+        thread.start()
+        logger.info("Monitoring thread started")
+    else:
+        logger.warning("Docker API client is not initialized. Monitoring thread not started.")
 except Exception as e:
-    logger.error(f"Error starting monitoring thread: {e}")
+    logger.error(f"Failed to start monitoring thread: {e}")
 
 if __name__ == "__main__":
     if async_mode == 'eventlet':
-        try:
-            import eventlet
-            eventlet.monkey_patch()
-        except ImportError:
-            logger.warning("Eventlet import failed")
+        eventlet.wsgi.server(eventlet.listen(('0.0.0.0', 5000)), app)
     elif async_mode == 'gevent':
-        try:
-            from gevent import monkey
-            monkey.patch_all()
-        except ImportError:
-            logger.warning("Gevent import failed")
-    
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True)
+        http_server = WSGIServer(('0.0.0.0', 5000), app)
+        http_server.serve_forever()
+    else:
+        socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)
