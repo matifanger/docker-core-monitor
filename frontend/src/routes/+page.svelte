@@ -15,6 +15,10 @@
     import IconSortAsc from '~icons/mdi/sort-ascending';
     import IconSortDesc from '~icons/mdi/sort-descending';
     import IconName from '~icons/mdi/alphabetical';
+    import IconEdit from '~icons/mdi/pencil';
+    import IconSave from '~icons/mdi/content-save';
+    import IconCancel from '~icons/mdi/close';
+    import IconReset from '~icons/mdi/refresh';
     // Gráfico
     import { Chart } from 'chart.js/auto';
 
@@ -45,6 +49,14 @@
     let networkHistory: NetworkHistory = { rx: [], tx: [] };
     let viewMode: "groups" | "list" = "groups";
     let systemInfo: { MemTotal: number, NCPU: number } = { MemTotal: 0, NCPU: 0 };
+    
+    // Custom names
+    let customNames: { containers: Record<string, string>, groups: Record<string, string> } = { containers: {}, groups: {} };
+    
+    // Editing state
+    let editingContainerId: string | null = null;
+    let editingGroupName: string | null = null;
+    let editingName: string = '';
     
     // Sort options
     type SortField = "memory" | "cpu" | "name" | "network_rx" | "network_tx" | "io_read" | "io_write" | "uptime" | "status";
@@ -77,6 +89,125 @@
         await fetch(`${API_URL}/start`);
     }
     
+    async function fetchCustomNames() {
+        try {
+            const res = await fetch(`${API_URL}/custom-names`);
+            customNames = await res.json();
+        } catch (e) {
+            console.error("Failed to fetch custom names", e);
+        }
+    }
+    
+    async function updateContainerName(containerId: string, name: string) {
+        try {
+            const res = await fetch(`${API_URL}/custom-names/container/${containerId}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ name })
+            });
+            
+            if (res.ok) {
+                // Update local state
+                customNames.containers[containerId] = name;
+                // Update container name in the UI immediately
+                containers = containers.map(c => 
+                    c.id === containerId ? { ...c, name } : c
+                );
+            } else {
+                console.error("Failed to update container name");
+            }
+        } catch (e) {
+            console.error("Error updating container name", e);
+        }
+        
+        // Reset editing state
+        editingContainerId = null;
+        editingName = '';
+    }
+    
+    async function updateGroupName(originalName: string, newName: string) {
+        try {
+            const res = await fetch(`${API_URL}/custom-names/group/${originalName}`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ name: newName })
+            });
+            
+            if (res.ok) {
+                // Update local state
+                customNames.groups[originalName] = newName;
+            } else {
+                console.error("Failed to update group name");
+            }
+        } catch (e) {
+            console.error("Error updating group name", e);
+        }
+        
+        // Reset editing state
+        editingGroupName = null;
+        editingName = '';
+    }
+    
+    async function resetContainerName(containerId: string) {
+        try {
+            const res = await fetch(`${API_URL}/custom-names/container/${containerId}`, {
+                method: 'DELETE'
+            });
+            
+            if (res.ok) {
+                // Update local state
+                delete customNames.containers[containerId];
+                // Refresh containers to get original names
+                await fetchContainers();
+            } else {
+                console.error("Failed to reset container name");
+            }
+        } catch (e) {
+            console.error("Error resetting container name", e);
+        }
+    }
+    
+    async function resetGroupName(groupName: string) {
+        try {
+            const res = await fetch(`${API_URL}/custom-names/group/${groupName}`, {
+                method: 'DELETE'
+            });
+            
+            if (res.ok) {
+                // Update local state
+                delete customNames.groups[groupName];
+            } else {
+                console.error("Failed to reset group name");
+            }
+        } catch (e) {
+            console.error("Error resetting group name", e);
+        }
+    }
+    
+    function startEditingContainer(containerId: string, currentName: string) {
+        editingContainerId = containerId;
+        editingName = currentName;
+        // Close any open group editing
+        editingGroupName = null;
+    }
+    
+    function startEditingGroup(groupName: string, displayName: string) {
+        editingGroupName = groupName;
+        editingName = displayName;
+        // Close any open container editing
+        editingContainerId = null;
+    }
+    
+    function cancelEditing() {
+        editingContainerId = null;
+        editingGroupName = null;
+        editingName = '';
+    }
+    
     function setSortOption(field: SortField) {
         if (sortField === field) {
             // Toggle direction if same field
@@ -106,6 +237,7 @@
 
     onMount(() => {
         fetchContainers();
+        fetchCustomNames();
         startMonitoring();
         
         // Load sort preferences from localStorage
@@ -157,9 +289,14 @@
         socket.on("connect", () => {
             console.log("Connected to WebSocket");
         });
-        socket.on("update_stats", (data: { containers: Record<string, Stats>, system_info: { MemTotal: number, NCPU: number } }) => {
+        socket.on("update_stats", (data: { 
+            containers: Record<string, Stats>, 
+            system_info: { MemTotal: number, NCPU: number },
+            custom_names: { containers: Record<string, string>, groups: Record<string, string> }
+        }) => {
             stats = data.containers || {};
             systemInfo = data.system_info || { MemTotal: 0, NCPU: 0 };
+            customNames = data.custom_names || { containers: {}, groups: {} };
             const totalRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
             const totalTx = Object.values(stats).reduce((sum, stat) => sum + stat.network_tx, 0);
             networkHistory.rx = [...networkHistory.rx.slice(-9), totalRx].slice(-10);
@@ -224,6 +361,16 @@
         if (max >= 1e6) return { divisor: 1e6, unit: 'MB' };
         if (max >= 1e3) return { divisor: 1e3, unit: 'KB' };
         return { divisor: 1, unit: 'B' };
+    }
+
+    // Get display name for a container
+    function getContainerDisplayName(container: Container): string {
+        return container.name;
+    }
+    
+    // Get display name for a group
+    function getGroupDisplayName(groupName: string): string {
+        return customNames.groups[groupName] || groupName;
     }
 
     $: groupedContainers = (containers || []).reduce((acc: Record<string, Container[]>, container) => {
@@ -443,9 +590,53 @@
             {#each sortedGroups as [groupName, groupContainers]}
                 <section class="space-y-4">
                     <div class="flex items-center justify-between border-b border-cyan-500/20 pb-2">
-                        <h2 class="text-2xl md:text-3xl font-display text-cyan-400 uppercase tracking-wider">
-                            {groupName}
-                        </h2>
+                        <div class="flex items-center gap-2">
+                            {#if editingGroupName === groupName}
+                                <div class="flex items-center gap-2">
+                                    <input 
+                                        type="text" 
+                                        bind:value={editingName} 
+                                        class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 min-w-[200px]"
+                                        placeholder="Enter group name"
+                                        autofocus
+                                    />
+                                    <button 
+                                        class="text-green-400 hover:text-green-300 transition-colors"
+                                        on:click={() => updateGroupName(groupName, editingName)}
+                                        title="Save"
+                                    >
+                                        <IconSave class="w-5 h-5" />
+                                    </button>
+                                    <button 
+                                        class="text-red-400 hover:text-red-300 transition-colors"
+                                        on:click={cancelEditing}
+                                        title="Cancel"
+                                    >
+                                        <IconCancel class="w-5 h-5" />
+                                    </button>
+                                </div>
+                            {:else}
+                                <h2 class="text-2xl md:text-3xl font-display text-cyan-400 uppercase tracking-wider flex items-center gap-2">
+                                    {getGroupDisplayName(groupName)}
+                                    <button 
+                                        class="text-gray-400 hover:text-cyan-300 transition-colors"
+                                        on:click={() => startEditingGroup(groupName, getGroupDisplayName(groupName))}
+                                        title="Edit group name"
+                                    >
+                                        <IconEdit class="w-5 h-5" />
+                                    </button>
+                                    {#if customNames.groups[groupName]}
+                                        <button 
+                                            class="text-gray-400 hover:text-red-300 transition-colors"
+                                            on:click={() => resetGroupName(groupName)}
+                                            title="Reset to original name"
+                                        >
+                                            <IconReset class="w-5 h-5" />
+                                        </button>
+                                    {/if}
+                                </h2>
+                            {/if}
+                        </div>
                         <div class="hidden md:flex space-x-4 text-sm text-gray-300 font-mono">
                             <span>CPU: <span class="text-cyan-400">{formatCpuInfo(groupTotals[groupName]?.cpu, groupTotals[groupName]?.cpuCount, null)}</span></span>
                             <span>MEM: <span class="text-cyan-400">{formatBytes(groupTotals[groupName]?.memory)}</span></span>
@@ -466,11 +657,55 @@
                                     class="absolute top-4 right-4 w-3 h-3 rounded-full {container.status === 'running' ? 'bg-green-400 animate-subtle-pulse' : 'bg-red-500'}"
                                 ></div>
 
-                                <h3
-                                    class="text-xl font-mono text-white group-hover:text-cyan-400 transition-colors duration-300 truncate"
-                                >
-                                    {container.name}
-                                </h3>
+                                {#if editingContainerId === container.id}
+                                    <div class="flex items-center gap-2 mb-2">
+                                        <input 
+                                            type="text" 
+                                            bind:value={editingName} 
+                                            class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 w-full"
+                                            placeholder="Enter container name"
+                                            autofocus
+                                        />
+                                        <button 
+                                            class="text-green-400 hover:text-green-300 transition-colors"
+                                            on:click={() => updateContainerName(container.id, editingName)}
+                                            title="Save"
+                                        >
+                                            <IconSave class="w-5 h-5" />
+                                        </button>
+                                        <button 
+                                            class="text-red-400 hover:text-red-300 transition-colors"
+                                            on:click={cancelEditing}
+                                            title="Cancel"
+                                        >
+                                            <IconCancel class="w-5 h-5" />
+                                        </button>
+                                    </div>
+                                {:else}
+                                    <div class="flex items-center gap-2">
+                                        <h3
+                                            class="text-xl font-mono text-white group-hover:text-cyan-400 transition-colors duration-300 truncate"
+                                        >
+                                            {container.name}
+                                        </h3>
+                                        <button 
+                                            class="text-gray-500 hover:text-cyan-300 transition-colors opacity-70 group-hover:opacity-100"
+                                            on:click={() => startEditingContainer(container.id, container.name)}
+                                            title="Edit container name"
+                                        >
+                                            <IconEdit class="w-4 h-4" />
+                                        </button>
+                                        {#if customNames.containers[container.id]}
+                                            <button 
+                                                class="text-gray-500 hover:text-red-300 transition-colors opacity-70 group-hover:opacity-100"
+                                                on:click={() => resetContainerName(container.id)}
+                                                title="Reset to original name"
+                                            >
+                                                <IconReset class="w-4 h-4" />
+                                            </button>
+                                        {/if}
+                                    </div>
+                                {/if}
 
                                 <p
                                     class="text-sm font-mono text-gray-400 mt-1 capitalize {container.status === 'running' ? 'text-green-400' : 'text-red-400'}"
@@ -594,22 +829,67 @@
             
             {#each sortedContainers as container}
                 <div
-                    class="bg-gray-900/70 border border-gray-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between hover:border-cyan-500/70 transition-all duration-500 hover:shadow-[0_0_20px_rgba(0,255,204,0.3)] gap-4"
+                    class="bg-gray-900/70 border border-gray-800 rounded-xl p-4 flex flex-col md:flex-row items-start md:items-center justify-between hover:border-cyan-500/70 transition-all duration-500 hover:shadow-[0_0_20px_rgba(0,255,204,0.3)] gap-4 group"
                 >
                     <div class="flex items-center space-x-4">
                         <div
                             class="w-3 h-3 rounded-full {container.status === 'running' ? 'bg-green-400 animate-subtle-pulse' : 'bg-red-500'} {sortField === 'status' ? 'ring-2 ring-cyan-400 ring-offset-1 ring-offset-gray-900' : ''}"
                         ></div>
-                        <h3 class="text-lg font-mono {sortField === 'name' ? 'text-cyan-400' : 'text-white'} truncate">
-                            {container.name}
-                            {#if sortField === "name"}
-                                {#if sortDirection === "asc"}
-                                    <IconSortAsc class="inline w-3 h-3 ml-1" />
-                                {:else}
-                                    <IconSortDesc class="inline w-3 h-3 ml-1" />
+                        
+                        {#if editingContainerId === container.id}
+                            <div class="flex items-center gap-2">
+                                <input 
+                                    type="text" 
+                                    bind:value={editingName} 
+                                    class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 w-full"
+                                    placeholder="Enter container name"
+                                    autofocus
+                                />
+                                <button 
+                                    class="text-green-400 hover:text-green-300 transition-colors"
+                                    on:click={() => updateContainerName(container.id, editingName)}
+                                    title="Save"
+                                >
+                                    <IconSave class="w-5 h-5" />
+                                </button>
+                                <button 
+                                    class="text-red-400 hover:text-red-300 transition-colors"
+                                    on:click={cancelEditing}
+                                    title="Cancel"
+                                >
+                                    <IconCancel class="w-5 h-5" />
+                                </button>
+                            </div>
+                        {:else}
+                            <div class="flex items-center gap-2">
+                                <h3 class="text-lg font-mono {sortField === 'name' ? 'text-cyan-400' : 'text-white'} truncate">
+                                    {container.name}
+                                    {#if sortField === "name"}
+                                        {#if sortDirection === "asc"}
+                                            <IconSortAsc class="inline w-3 h-3 ml-1" />
+                                        {:else}
+                                            <IconSortDesc class="inline w-3 h-3 ml-1" />
+                                        {/if}
+                                    {/if}
+                                </h3>
+                                <button 
+                                    class="text-gray-500 hover:text-cyan-300 transition-colors opacity-70 group-hover:opacity-100"
+                                    on:click={() => startEditingContainer(container.id, container.name)}
+                                    title="Edit container name"
+                                >
+                                    <IconEdit class="w-4 h-4" />
+                                </button>
+                                {#if customNames.containers[container.id]}
+                                    <button 
+                                        class="text-gray-500 hover:text-red-300 transition-colors opacity-70 group-hover:opacity-100"
+                                        on:click={() => resetContainerName(container.id)}
+                                        title="Reset to original name"
+                                    >
+                                        <IconReset class="w-4 h-4" />
+                                    </button>
                                 {/if}
-                            {/if}
-                        </h3>
+                            </div>
+                        {/if}
                     </div>
                     <div class="text-sm text-gray-300 font-mono flex flex-wrap gap-4 md:gap-6">
                         <span class={sortField === "cpu" ? "text-cyan-400" : ""}>

@@ -1,4 +1,4 @@
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import docker
@@ -7,6 +7,7 @@ import time
 import platform
 import os
 import logging
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
@@ -51,6 +52,31 @@ except Exception as e:
     docker_api = None
 
 container_stats = {}
+
+# Custom names storage
+CUSTOM_NAMES_FILE = 'custom_names.json'
+
+# Load custom names from file or initialize empty dict
+def load_custom_names():
+    try:
+        if os.path.exists(CUSTOM_NAMES_FILE):
+            with open(CUSTOM_NAMES_FILE, 'r') as f:
+                return json.load(f)
+        return {"containers": {}, "groups": {}}
+    except Exception as e:
+        logger.error(f"Error loading custom names: {e}")
+        return {"containers": {}, "groups": {}}
+
+# Save custom names to file
+def save_custom_names(custom_names):
+    try:
+        with open(CUSTOM_NAMES_FILE, 'w') as f:
+            json.dump(custom_names, f)
+    except Exception as e:
+        logger.error(f"Error saving custom names: {e}")
+
+# Initialize custom names
+custom_names = load_custom_names()
 
 def calculate_cpu_percent(stats):
     try:
@@ -181,6 +207,9 @@ def fetch_container_stats():
                 futures = {executor.submit(get_container_stats, c): c for c in containers}
                 for future in futures:
                     container_id, stat = future.result()
+                    # Apply custom container name if exists
+                    if container_id in custom_names["containers"]:
+                        stat["name"] = custom_names["containers"][container_id]
                     stats_data[container_id] = stat
 
             global container_stats
@@ -202,7 +231,8 @@ def fetch_container_stats():
             # Send the data in the format expected by the frontend
             socketio.emit("update_stats", {
                 "containers": container_stats,
-                "system_info": system_info
+                "system_info": system_info,
+                "custom_names": custom_names
             })
             logger.debug(f"Emitted stats for {len(container_stats)} containers")
         except Exception as e:
@@ -225,13 +255,89 @@ def get_containers():
             return jsonify({"error": "Docker API client is not initialized"}), 500
             
         containers = docker_api.containers.list(all=True)
-        return jsonify([{
-            "id": c.id, 
-            "name": c.name, 
-            "status": c.status
-        } for c in containers])
+        container_list = []
+        
+        for c in containers:
+            container_data = {
+                "id": c.id, 
+                "name": c.name, 
+                "status": c.status
+            }
+            
+            # Apply custom container name if exists
+            if c.id in custom_names["containers"]:
+                container_data["name"] = custom_names["containers"][c.id]
+                
+            container_list.append(container_data)
+            
+        return jsonify(container_list)
     except Exception as e:
         logger.error(f"Error getting containers: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# API endpoints for custom names
+@app.route("/custom-names", methods=["GET"])
+def get_custom_names():
+    return jsonify(custom_names)
+
+@app.route("/custom-names/container/<container_id>", methods=["POST"])
+def update_container_name(container_id):
+    try:
+        data = request.json
+        if not data or "name" not in data:
+            return jsonify({"error": "Name is required"}), 400
+            
+        # Update container name
+        custom_names["containers"][container_id] = data["name"]
+        save_custom_names(custom_names)
+        
+        # Update stats with new name
+        if container_id in container_stats:
+            container_stats[container_id]["name"] = data["name"]
+            
+        return jsonify({"success": True, "message": "Container name updated"})
+    except Exception as e:
+        logger.error(f"Error updating container name: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/custom-names/group/<group_name>", methods=["POST"])
+def update_group_name(group_name):
+    try:
+        data = request.json
+        if not data or "name" not in data:
+            return jsonify({"error": "Name is required"}), 400
+            
+        # Update group name
+        custom_names["groups"][group_name] = data["name"]
+        save_custom_names(custom_names)
+        
+        return jsonify({"success": True, "message": "Group name updated"})
+    except Exception as e:
+        logger.error(f"Error updating group name: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/custom-names/container/<container_id>", methods=["DELETE"])
+def reset_container_name(container_id):
+    try:
+        if container_id in custom_names["containers"]:
+            del custom_names["containers"][container_id]
+            save_custom_names(custom_names)
+            
+        return jsonify({"success": True, "message": "Container name reset"})
+    except Exception as e:
+        logger.error(f"Error resetting container name: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/custom-names/group/<group_name>", methods=["DELETE"])
+def reset_group_name(group_name):
+    try:
+        if group_name in custom_names["groups"]:
+            del custom_names["groups"][group_name]
+            save_custom_names(custom_names)
+            
+        return jsonify({"success": True, "message": "Group name reset"})
+    except Exception as e:
+        logger.error(f"Error resetting group name: {e}")
         return jsonify({"error": str(e)}), 500
 
 @socketio.on("connect")
@@ -251,7 +357,8 @@ def handle_connect():
         # Send the data in the format expected by the frontend
         emit("update_stats", {
             "containers": container_stats,
-            "system_info": system_info
+            "system_info": system_info,
+            "custom_names": custom_names
         })
         logger.info("Sent initial stats to new client connection")
     except Exception as e:
