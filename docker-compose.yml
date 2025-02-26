@@ -8,6 +8,7 @@ services:
     container_name: docker-monitor-backend
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+      - docker-monitor-data:/app/data
     ports:
       - "5000:5000"
     restart: unless-stopped
@@ -36,3 +37,7 @@ services:
 networks:
   monitor-network:
     driver: bridge
+
+volumes:
+  docker-monitor-data:
+    driver: local

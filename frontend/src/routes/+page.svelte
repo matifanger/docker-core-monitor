@@ -19,6 +19,7 @@
     import IconSave from '~icons/mdi/content-save';
     import IconCancel from '~icons/mdi/close';
     import IconReset from '~icons/mdi/refresh';
+    import IconDrag from '~icons/mdi/drag';
     // Gráfico
     import { Chart } from 'chart.js/auto';
 
@@ -39,6 +40,99 @@
         };
     }
 
+    // Drag and drop directive
+    function draggable(node: HTMLElement, data: any) {
+        let state = data;
+
+        node.draggable = true;
+        
+        function handleDragStart(event: DragEvent) {
+            if (!event.dataTransfer) return;
+            
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', JSON.stringify(state));
+            
+            node.classList.add('dragging');
+            
+            // Set a ghost image
+            const ghost = node.cloneNode(true) as HTMLElement;
+            ghost.style.position = 'absolute';
+            ghost.style.top = '-1000px';
+            ghost.style.opacity = '0.5';
+            document.body.appendChild(ghost);
+            event.dataTransfer.setDragImage(ghost, 0, 0);
+            
+            setTimeout(() => {
+                document.body.removeChild(ghost);
+            }, 0);
+        }
+        
+        function handleDragEnd() {
+            node.classList.remove('dragging');
+        }
+        
+        node.addEventListener('dragstart', handleDragStart);
+        node.addEventListener('dragend', handleDragEnd);
+        
+        return {
+            update(newState: any) {
+                state = newState;
+            },
+            destroy() {
+                node.removeEventListener('dragstart', handleDragStart);
+                node.removeEventListener('dragend', handleDragEnd);
+            }
+        };
+    }
+    
+    // Drop zone directive
+    function dropZone(node: HTMLElement, options: { onDrop: (data: any) => void }) {
+        function handleDragOver(event: DragEvent) {
+            event.preventDefault();
+            if (!event.dataTransfer) return;
+            
+            event.dataTransfer.dropEffect = 'move';
+            node.classList.add('drop-target');
+        }
+        
+        function handleDragEnter(event: DragEvent) {
+            event.preventDefault();
+            node.classList.add('drop-target');
+        }
+        
+        function handleDragLeave() {
+            node.classList.remove('drop-target');
+        }
+        
+        function handleDrop(event: DragEvent) {
+            event.preventDefault();
+            node.classList.remove('drop-target');
+            
+            if (!event.dataTransfer) return;
+            
+            try {
+                const data = JSON.parse(event.dataTransfer.getData('text/plain'));
+                options.onDrop(data);
+            } catch (e) {
+                console.error('Error parsing drag data', e);
+            }
+        }
+        
+        node.addEventListener('dragover', handleDragOver);
+        node.addEventListener('dragenter', handleDragEnter);
+        node.addEventListener('dragleave', handleDragLeave);
+        node.addEventListener('drop', handleDrop);
+        
+        return {
+            destroy() {
+                node.removeEventListener('dragover', handleDragOver);
+                node.removeEventListener('dragenter', handleDragEnter);
+                node.removeEventListener('dragleave', handleDragLeave);
+                node.removeEventListener('drop', handleDrop);
+            }
+        };
+    }
+
     const API_URL = env.PUBLIC_API_URL ?? 'http://localhost:5000';
     const SOCKET_URL = env.PUBLIC_SOCKET_URL ?? 'http://localhost:5000';
     const REFRESH_INTERVAL = parseInt(env.PUBLIC_REFRESH_INTERVAL ?? '10000');
@@ -51,12 +145,24 @@
     let systemInfo: { MemTotal: number, NCPU: number } = { MemTotal: 0, NCPU: 0 };
     
     // Custom names
-    let customNames: { containers: Record<string, string>, groups: Record<string, string> } = { containers: {}, groups: {} };
+    let customNames: { 
+        containers: Record<string, string>, 
+        groups: Record<string, string>,
+        container_groups: Record<string, string>
+    } = { 
+        containers: {}, 
+        groups: {},
+        container_groups: {}
+    };
     
     // Editing state
     let editingContainerId: string | null = null;
     let editingGroupName: string | null = null;
     let editingName: string = '';
+    
+    // Drag state
+    let isDragging = false;
+    let draggedContainer: Container | null = null;
     
     // Sort options
     type SortField = "memory" | "cpu" | "name" | "network_rx" | "network_tx" | "io_read" | "io_write" | "uptime" | "status";
@@ -80,6 +186,9 @@
 
     let networkChart: Chart;
 
+    // Make groupedContainers a writable variable
+    let groupedContainers: Record<string, Container[]> = {};
+
     async function fetchContainers() {
         const res = await fetch(`${API_URL}/containers`);
         containers = await res.json();
@@ -100,6 +209,28 @@
     
     async function updateContainerName(containerId: string, name: string) {
         try {
+            // Store original name for potential rollback
+            const originalName = containers.find(c => c.id === containerId)?.name;
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                containers: {
+                    ...customNames.containers,
+                    [containerId]: name
+                }
+            };
+            
+            // Update container name in the UI immediately
+            containers = containers.map(c => 
+                c.id === containerId ? { ...c, name } : c
+            );
+            
+            // Reset editing state
+            editingContainerId = null;
+            editingName = '';
+            
+            // Then update on the server
             const res = await fetch(`${API_URL}/custom-names/container/${containerId}`, {
                 method: 'POST',
                 headers: {
@@ -108,27 +239,48 @@
                 body: JSON.stringify({ name })
             });
             
-            if (res.ok) {
-                // Update local state
-                customNames.containers[containerId] = name;
-                // Update container name in the UI immediately
-                containers = containers.map(c => 
-                    c.id === containerId ? { ...c, name } : c
-                );
-            } else {
+            if (!res.ok) {
                 console.error("Failed to update container name");
+                // Revert local state if server update fails
+                if (originalName) {
+                    customNames = {
+                        ...customNames,
+                        containers: {
+                            ...customNames.containers
+                        }
+                    };
+                    delete customNames.containers[containerId];
+                    
+                    // Revert container name in UI
+                    containers = containers.map(c => 
+                        c.id === containerId ? { ...c, name: originalName } : c
+                    );
+                }
             }
         } catch (e) {
             console.error("Error updating container name", e);
         }
-        
-        // Reset editing state
-        editingContainerId = null;
-        editingName = '';
     }
     
     async function updateGroupName(originalName: string, newName: string) {
         try {
+            // Store previous name for potential rollback
+            const previousName = customNames.groups[originalName];
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                groups: {
+                    ...customNames.groups,
+                    [originalName]: newName
+                }
+            };
+            
+            // Reset editing state
+            editingGroupName = null;
+            editingName = '';
+            
+            // Then update on the server
             const res = await fetch(`${API_URL}/custom-names/group/${originalName}`, {
                 method: 'POST',
                 headers: {
@@ -137,34 +289,76 @@
                 body: JSON.stringify({ name: newName })
             });
             
-            if (res.ok) {
-                // Update local state
-                customNames.groups[originalName] = newName;
-            } else {
+            if (!res.ok) {
                 console.error("Failed to update group name");
+                // Revert local state if server update fails
+                if (previousName) {
+                    customNames = {
+                        ...customNames,
+                        groups: {
+                            ...customNames.groups,
+                            [originalName]: previousName
+                        }
+                    };
+                } else {
+                    customNames = {
+                        ...customNames,
+                        groups: {
+                            ...customNames.groups
+                        }
+                    };
+                    delete customNames.groups[originalName];
+                }
             }
         } catch (e) {
             console.error("Error updating group name", e);
         }
-        
-        // Reset editing state
-        editingGroupName = null;
-        editingName = '';
     }
     
     async function resetContainerName(containerId: string) {
         try {
+            // Store the custom name for potential rollback
+            const customName = customNames.containers[containerId];
+            const originalName = containers.find(c => c.id === containerId)?.name;
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                containers: {
+                    ...customNames.containers
+                }
+            };
+            delete customNames.containers[containerId];
+            
+            // Update container name in UI immediately if we know the original name
+            if (originalName) {
+                containers = containers.map(c => 
+                    c.id === containerId ? { ...c, name: originalName } : c
+                );
+            }
+            
+            // Then update on the server
             const res = await fetch(`${API_URL}/custom-names/container/${containerId}`, {
                 method: 'DELETE'
             });
             
-            if (res.ok) {
-                // Update local state
-                delete customNames.containers[containerId];
-                // Refresh containers to get original names
-                await fetchContainers();
-            } else {
+            if (!res.ok) {
                 console.error("Failed to reset container name");
+                // Revert local state if server update fails
+                if (customName) {
+                    customNames = {
+                        ...customNames,
+                        containers: {
+                            ...customNames.containers,
+                            [containerId]: customName
+                        }
+                    };
+                    
+                    // Revert container name in UI
+                    containers = containers.map(c => 
+                        c.id === containerId ? { ...c, name: customName } : c
+                    );
+                }
             }
         } catch (e) {
             console.error("Error resetting container name", e);
@@ -173,19 +367,185 @@
     
     async function resetGroupName(groupName: string) {
         try {
+            // Store the custom name for potential rollback
+            const customName = customNames.groups[groupName];
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                groups: {
+                    ...customNames.groups
+                }
+            };
+            delete customNames.groups[groupName];
+            
+            // Then update on the server
             const res = await fetch(`${API_URL}/custom-names/group/${groupName}`, {
                 method: 'DELETE'
             });
             
-            if (res.ok) {
-                // Update local state
-                delete customNames.groups[groupName];
-            } else {
+            if (!res.ok) {
                 console.error("Failed to reset group name");
+                // Revert local state if server update fails
+                if (customName) {
+                    customNames = {
+                        ...customNames,
+                        groups: {
+                            ...customNames.groups,
+                            [groupName]: customName
+                        }
+                    };
+                }
             }
         } catch (e) {
             console.error("Error resetting group name", e);
         }
+    }
+    
+    async function updateContainerGroup(containerId: string, groupName: string) {
+        try {
+            const res = await fetch(`${API_URL}/container-group`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    containerId, 
+                    groupName 
+                })
+            });
+            
+            if (!res.ok) {
+                console.error("Failed to update container group");
+                // Revert local state if server update fails
+                customNames = {
+                    ...customNames,
+                    container_groups: {
+                        ...customNames.container_groups
+                    }
+                };
+                delete customNames.container_groups[containerId];
+            }
+        } catch (e) {
+            console.error("Error updating container group", e);
+            // Revert local state if server update fails
+            customNames = {
+                ...customNames,
+                container_groups: {
+                    ...customNames.container_groups
+                }
+            };
+            delete customNames.container_groups[containerId];
+        }
+    }
+    
+    async function resetContainerGroup(containerId: string) {
+        try {
+            // Store the previous value in case we need to revert
+            const previousGroup = customNames.container_groups[containerId];
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                container_groups: {
+                    ...customNames.container_groups
+                }
+            };
+            delete customNames.container_groups[containerId];
+            
+            // Manually update groupedContainers for immediate UI update
+            const container = containers.find(c => c.id === containerId);
+            if (container && groupedContainers && previousGroup) {
+                // Get the new group (original group based on name)
+                const originalGroup = container.name.split(/[-_]/)[0] || container.name;
+                
+                // Remove from current group
+                if (groupedContainers[previousGroup]) {
+                    groupedContainers[previousGroup] = groupedContainers[previousGroup].filter(c => c.id !== containerId);
+                    // If group is empty, remove it
+                    if (groupedContainers[previousGroup].length === 0) {
+                        delete groupedContainers[previousGroup];
+                    }
+                }
+                
+                // Add to original group
+                if (!groupedContainers[originalGroup]) {
+                    groupedContainers[originalGroup] = [];
+                }
+                groupedContainers[originalGroup].push(container);
+                
+                // Force reactivity update
+                groupedContainers = {...groupedContainers};
+            }
+            
+            // Then update on the server
+            const res = await fetch(`${API_URL}/container-group/${containerId}`, {
+                method: 'DELETE'
+            });
+            
+            if (!res.ok) {
+                console.error("Failed to reset container group");
+                // Revert local state if server update fails
+                if (previousGroup) {
+                    customNames = {
+                        ...customNames,
+                        container_groups: {
+                            ...customNames.container_groups,
+                            [containerId]: previousGroup
+                        }
+                    };
+                    
+                    // Revert groupedContainers changes
+                    if (container && groupedContainers) {
+                        const originalGroup = container.name.split(/[-_]/)[0] || container.name;
+                        
+                        // Remove from original group
+                        if (groupedContainers[originalGroup]) {
+                            groupedContainers[originalGroup] = groupedContainers[originalGroup].filter(c => c.id !== containerId);
+                            if (groupedContainers[originalGroup].length === 0) {
+                                delete groupedContainers[originalGroup];
+                            }
+                        }
+                        
+                        // Add back to previous group
+                        if (!groupedContainers[previousGroup]) {
+                            groupedContainers[previousGroup] = [];
+                        }
+                        groupedContainers[previousGroup].push(container);
+                        
+                        // Force reactivity update
+                        groupedContainers = {...groupedContainers};
+                    }
+                }
+            }
+        } catch (e) {
+            console.error("Error resetting container group", e);
+        }
+    }
+    
+    function handleContainerDrop(groupName: string, containerData: { id: string, name: string }) {
+        const currentGroup = getContainerGroup(containerData.id);
+        if (currentGroup === groupName) {
+            return; // Already in this group
+        }
+        
+        // Update local state immediately
+        customNames = {
+            ...customNames,
+            container_groups: {
+                ...customNames.container_groups,
+                [containerData.id]: groupName
+            }
+        };
+        
+        // Then update on the server
+        updateContainerGroup(containerData.id, groupName);
+        
+        // Fetch containers immediately to update the UI
+        fetchContainers();
+        
+        // And fetch again after a short delay to ensure we have the latest data
+        setTimeout(fetchContainers, 500);
     }
     
     function startEditingContainer(containerId: string, currentName: string) {
@@ -292,15 +652,28 @@
         socket.on("update_stats", (data: { 
             containers: Record<string, Stats>, 
             system_info: { MemTotal: number, NCPU: number },
-            custom_names: { containers: Record<string, string>, groups: Record<string, string> }
+            custom_names: { 
+                containers: Record<string, string>, 
+                groups: Record<string, string>,
+                container_groups: Record<string, string>
+            }
         }) => {
             stats = data.containers || {};
             systemInfo = data.system_info || { MemTotal: 0, NCPU: 0 };
-            customNames = data.custom_names || { containers: {}, groups: {} };
+            customNames = data.custom_names || { containers: {}, groups: {}, container_groups: {} };
             const totalRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
             const totalTx = Object.values(stats).reduce((sum, stat) => sum + stat.network_tx, 0);
             networkHistory.rx = [...networkHistory.rx.slice(-9), totalRx].slice(-10);
             networkHistory.tx = [...networkHistory.tx.slice(-9), totalTx].slice(-10);
+            
+            // Force update of groupedContainers to reflect any changes in container groups
+            // This ensures the UI updates when container groups change from other clients
+            groupedContainers = (containers || []).reduce((acc: Record<string, Container[]>, container) => {
+                const groupName = getContainerGroup(container.id);
+                acc[groupName] = acc[groupName] || [];
+                acc[groupName].push(container);
+                return acc;
+            }, {});
         });
 
         intervalId = setInterval(fetchContainers, REFRESH_INTERVAL);
@@ -372,13 +745,32 @@
     function getGroupDisplayName(groupName: string): string {
         return customNames.groups[groupName] || groupName;
     }
+    
+    // Get the group for a container (custom or original)
+    function getContainerGroup(containerId: string): string {
+        const container = containers.find(c => c.id === containerId);
+        if (!container) return "";
+        
+        // If there's a custom group, use it
+        if (customNames.container_groups && customNames.container_groups[containerId]) {
+            return customNames.container_groups[containerId];
+        }
+        
+        // Otherwise use the original group (first part of the name)
+        return container.name.split(/[-_]/)[0] || container.name;
+    }
 
-    $: groupedContainers = (containers || []).reduce((acc: Record<string, Container[]>, container) => {
-        const prefix = container.name.split(/[-_]/)[0] || container.name;
-        acc[prefix] = acc[prefix] || [];
-        acc[prefix].push(container);
-        return acc;
-    }, {});
+    $: {
+        // Update groupedContainers when containers or customNames change
+        groupedContainers = (containers || []).reduce((acc: Record<string, Container[]>, container) => {
+            // Use custom group if available, otherwise use the original group
+            const groupName = getContainerGroup(container.id);
+            
+            acc[groupName] = acc[groupName] || [];
+            acc[groupName].push(container);
+            return acc;
+        }, {});
+    }
 
     $: sortedGroups = Object.entries(groupedContainers || {}).sort((a, b) => {
         const aRunning = a[1].some(c => c.status === "running") ? 1 : 0;
@@ -589,7 +981,8 @@
         <div class="w-full max-w-7xl space-y-8">
             {#each sortedGroups as [groupName, groupContainers]}
                 <section class="space-y-4">
-                    <div class="flex items-center justify-between border-b border-cyan-500/20 pb-2">
+                    <div class="flex items-center justify-between border-b border-cyan-500/20 pb-2"
+                         use:dropZone={{ onDrop: (data) => handleContainerDrop(groupName, data) }}>
                         <div class="flex items-center gap-2">
                             {#if editingGroupName === groupName}
                                 <div class="flex items-center gap-2">
@@ -598,7 +991,6 @@
                                         bind:value={editingName} 
                                         class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 min-w-[200px]"
                                         placeholder="Enter group name"
-                                        autofocus
                                     />
                                     <button 
                                         class="text-green-400 hover:text-green-300 transition-colors"
@@ -652,6 +1044,7 @@
                         {#each groupContainers as container (container.id)}
                             <div
                                 class="relative bg-gray-900/70 border border-gray-800 rounded-xl p-6 hover:border-cyan-500/70 transition-all duration-500 hover:shadow-[0_0_20px_rgba(0,255,204,0.3)] group"
+                                use:draggable={{ id: container.id, name: container.name }}
                             >
                                 <div
                                     class="absolute top-4 right-4 w-3 h-3 rounded-full {container.status === 'running' ? 'bg-green-400 animate-subtle-pulse' : 'bg-red-500'}"
@@ -664,7 +1057,6 @@
                                             bind:value={editingName} 
                                             class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 w-full"
                                             placeholder="Enter container name"
-                                            autofocus
                                         />
                                         <button 
                                             class="text-green-400 hover:text-green-300 transition-colors"
@@ -683,6 +1075,9 @@
                                     </div>
                                 {:else}
                                     <div class="flex items-center gap-2">
+                                        <div class="text-gray-500 cursor-move drag-handle">
+                                            <IconDrag class="w-5 h-5" />
+                                        </div>
                                         <h3
                                             class="text-xl font-mono text-white group-hover:text-cyan-400 transition-colors duration-300 truncate"
                                         >
@@ -700,6 +1095,15 @@
                                                 class="text-gray-500 hover:text-red-300 transition-colors opacity-70 group-hover:opacity-100"
                                                 on:click={() => resetContainerName(container.id)}
                                                 title="Reset to original name"
+                                            >
+                                                <IconReset class="w-4 h-4" />
+                                            </button>
+                                        {/if}
+                                        {#if customNames.container_groups[container.id]}
+                                            <button 
+                                                class="text-gray-500 hover:text-red-300 transition-colors opacity-70 group-hover:opacity-100"
+                                                on:click={() => resetContainerGroup(container.id)}
+                                                title="Reset to original group"
                                             >
                                                 <IconReset class="w-4 h-4" />
                                             </button>
@@ -843,7 +1247,6 @@
                                     bind:value={editingName} 
                                     class="bg-gray-800 text-white px-2 py-1 rounded border border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500 w-full"
                                     placeholder="Enter container name"
-                                    autofocus
                                 />
                                 <button 
                                     class="text-green-400 hover:text-green-300 transition-colors"
@@ -996,5 +1399,24 @@
     }
     .animate-subtle-pulse {
         animation: subtlePulse 2s infinite ease-in-out;
+    }
+
+    /* These classes are used by the draggable and dropZone directives */
+    :global(.dragging) {
+        opacity: 0.5;
+        cursor: move;
+    }
+    
+    :global(.drop-target) {
+        border-color: rgba(0, 255, 204, 0.7);
+        box-shadow: 0 0 20px rgba(0, 255, 204, 0.3);
+    }
+    
+    .drag-handle {
+        cursor: grab;
+    }
+    
+    .drag-handle:active {
+        cursor: grabbing;
     }
 </style>

@@ -11,8 +11,8 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Configure logging - only errors and critical info
+logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -30,23 +30,19 @@ except ImportError:
     except ImportError:
         async_mode = 'threading'
 
-logger.info(f"Using async_mode: {async_mode}")
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=True, engineio_logger=True)
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
 
 # Create Docker client based on the operating system
 try:
     if platform.system() == 'Windows':
         # For Windows, use the named pipe
         docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
-        logger.info("Connected to Docker using Windows named pipe")
     else:
         # For Unix-based systems, use the Unix socket
         docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
-        logger.info("Connected to Docker using Unix socket")
     
     # Test connection
     docker_api.ping()
-    logger.info(f"Docker connection successful. API version: {docker_api.version()['ApiVersion']}")
 except Exception as e:
     logger.error(f"Failed to connect to Docker: {e}")
     docker_api = None
@@ -54,18 +50,23 @@ except Exception as e:
 container_stats = {}
 
 # Custom names storage
-CUSTOM_NAMES_FILE = 'custom_names.json'
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+CUSTOM_NAMES_FILE = os.path.join(DATA_DIR, 'custom_names.json')
 
 # Load custom names from file or initialize empty dict
 def load_custom_names():
     try:
+        # Create data directory if it doesn't exist
+        if not os.path.exists(DATA_DIR):
+            os.makedirs(DATA_DIR)
+            
         if os.path.exists(CUSTOM_NAMES_FILE):
             with open(CUSTOM_NAMES_FILE, 'r') as f:
                 return json.load(f)
-        return {"containers": {}, "groups": {}}
+        return {"containers": {}, "groups": {}, "container_groups": {}}
     except Exception as e:
         logger.error(f"Error loading custom names: {e}")
-        return {"containers": {}, "groups": {}}
+        return {"containers": {}, "groups": {}, "container_groups": {}}
 
 # Save custom names to file
 def save_custom_names(custom_names):
@@ -234,7 +235,6 @@ def fetch_container_stats():
                 "system_info": system_info,
                 "custom_names": custom_names
             })
-            logger.debug(f"Emitted stats for {len(container_stats)} containers")
         except Exception as e:
             logger.error(f"Error in fetch_container_stats: {e}")
         time.sleep(2)
@@ -340,6 +340,37 @@ def reset_group_name(group_name):
         logger.error(f"Error resetting group name: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/container-group", methods=["POST"])
+def update_container_group():
+    try:
+        data = request.json
+        if not data or "containerId" not in data or "groupName" not in data:
+            return jsonify({"error": "Container ID and group name are required"}), 400
+            
+        container_id = data["containerId"]
+        group_name = data["groupName"]
+        
+        # Update container group
+        custom_names["container_groups"][container_id] = group_name
+        save_custom_names(custom_names)
+        
+        return jsonify({"success": True, "message": "Container group updated"})
+    except Exception as e:
+        logger.error(f"Error updating container group: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/container-group/<container_id>", methods=["DELETE"])
+def reset_container_group(container_id):
+    try:
+        if container_id in custom_names["container_groups"]:
+            del custom_names["container_groups"][container_id]
+            save_custom_names(custom_names)
+            
+        return jsonify({"success": True, "message": "Container group reset"})
+    except Exception as e:
+        logger.error(f"Error resetting container group: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @socketio.on("connect")
 def handle_connect():
     try:
@@ -360,7 +391,6 @@ def handle_connect():
             "system_info": system_info,
             "custom_names": custom_names
         })
-        logger.info("Sent initial stats to new client connection")
     except Exception as e:
         logger.error(f"Error in handle_connect: {e}")
         emit("error", {"message": "Failed to get system information"})
@@ -370,7 +400,6 @@ try:
     thread = threading.Thread(target=fetch_container_stats, daemon=True)
     thread.name = "stats_thread"
     thread.start()
-    logger.info("Monitoring thread started successfully")
 except Exception as e:
     logger.error(f"Error starting monitoring thread: {e}")
 
@@ -379,17 +408,13 @@ if __name__ == "__main__":
         try:
             import eventlet
             eventlet.monkey_patch()
-            logger.info("Starting server with eventlet")
         except ImportError:
             logger.warning("Eventlet import failed")
     elif async_mode == 'gevent':
         try:
             from gevent import monkey
             monkey.patch_all()
-            logger.info("Starting server with gevent")
         except ImportError:
             logger.warning("Gevent import failed")
-    else:
-        logger.info("Starting server with threading mode")
     
     socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True)
