@@ -119,6 +119,7 @@ def calculate_cpu_percent(stats):
             
         # Get number of CPUs
         cpu_count = cpu_stats.get("online_cpus", 0)
+        
         if cpu_count == 0:
             # Fallback to number of CPUs in the system
             cpu_count = 1
@@ -128,7 +129,15 @@ def calculate_cpu_percent(stats):
         system_delta = cpu_system_usage - precpu_system_usage
         
         if system_delta > 0 and cpu_delta > 0:
-            cpu_percent = (cpu_delta / system_delta) * cpu_count * 100.0
+            # Calculate CPU usage percentage
+            # The original formula multiplies by cpu_count which can lead to values over 100%
+            # We'll divide by cpu_count instead to get per-core average
+            cpu_percent = (cpu_delta / system_delta) * 100.0
+            
+            # Apply a sanity check to prevent unreasonably high values
+            if cpu_percent > 100.0 * cpu_count:
+                cpu_percent = 100.0 * cpu_count
+                
             return round(cpu_percent, 2)
         else:
             return 0.0
