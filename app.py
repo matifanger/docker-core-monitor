@@ -6,7 +6,7 @@ import threading
 import platform
 import concurrent.futures
 from datetime import datetime
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, redirect
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import docker
@@ -536,6 +536,16 @@ try:
         logger.warning("Docker API client is not initialized. Monitoring thread not started.")
 except Exception as e:
     logger.error(f"Failed to start monitoring thread: {e}")
+
+# Root route handler
+@app.route("/", methods=["GET"])
+def root():
+    return redirect("/containers")
+
+# Favicon route handler
+@app.route("/favicon.ico", methods=["GET"])
+def favicon():
+    return "", 204  # No content response
 
 if __name__ == "__main__":
     if async_mode == 'eventlet':
