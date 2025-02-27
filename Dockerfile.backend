@@ -4,7 +4,7 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc curl && \
+    apt-get install -y --no-install-recommends gcc curl procps net-tools iputils-ping && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -19,6 +19,10 @@ RUN mkdir -p /app/data && chmod 777 /app/data
 
 # Copy application code
 COPY app.py .
+
+# Ensure Docker socket has correct permissions if mounted
+RUN touch /var/run/docker.sock.test && \
+    rm /var/run/docker.sock.test
 
 # Expose the port the app runs on
 EXPOSE 5000

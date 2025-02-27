@@ -195,6 +195,8 @@
     let reconnectAttempts = 0;
     let maxReconnectAttempts = 5;
     let reconnectInterval: number | null = null;
+    let errorMessage = "Connection error";
+    let showDetailedError = false;
 
     async function fetchContainers() {
         const res = await fetch(`${API_URL}/containers`);
@@ -664,6 +666,7 @@
             console.log("Connected to WebSocket");
             isConnected = true;
             connectionError = false;
+            errorMessage = "";
             reconnectAttempts = 0;
             
             // Clear any existing reconnect interval
@@ -677,6 +680,7 @@
             console.error("Socket connection error:", error);
             connectionError = true;
             isConnected = false;
+            errorMessage = `Connection error: ${error.message || "Failed to connect to server"}`;
             
             // If we're not already trying to reconnect, start trying
             if (!reconnectInterval && reconnectAttempts < maxReconnectAttempts) {
@@ -689,6 +693,7 @@
                             clearInterval(reconnectInterval);
                             reconnectInterval = null;
                         }
+                        errorMessage = "Could not connect to server. Please check if Docker is running and accessible.";
                     } else {
                         // Try to reconnect
                         socket.connect();
@@ -704,6 +709,7 @@
             // If the disconnection wasn't initiated by the client, try to reconnect
             if (reason !== "io client disconnect") {
                 connectionError = true;
+                errorMessage = `Disconnected: ${reason}`;
                 
                 // If we're not already trying to reconnect, start trying
                 if (!reconnectInterval && reconnectAttempts < maxReconnectAttempts) {
@@ -716,6 +722,7 @@
                                 clearInterval(reconnectInterval);
                                 reconnectInterval = null;
                             }
+                            errorMessage = "Could not reconnect to server. Please check if Docker is running and accessible.";
                         } else {
                             // Try to reconnect
                             socket.connect();
@@ -723,6 +730,12 @@
                     }, 5000) as unknown as number;
                 }
             }
+        });
+        
+        socket.on("error", (error) => {
+            console.error("Socket error:", error);
+            errorMessage = error.message || "An error occurred with the server connection";
+            connectionError = true;
         });
         
         socket.on("update_stats", (data: { 
@@ -1453,11 +1466,34 @@
 
     <!-- Add connection status indicator -->
     {#if connectionError}
-    <div class="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-2 rounded-md shadow-lg z-50 flex items-center">
-        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+    <div class="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-3 rounded-md shadow-lg z-50 flex items-start">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2 mt-0.5 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
             <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
         </svg>
-        <span>Connection error. {reconnectAttempts < maxReconnectAttempts ? `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...` : 'Please refresh the page.'}</span>
+        <div class="flex flex-col">
+            <span class="font-medium">{errorMessage}</span>
+            {#if reconnectAttempts < maxReconnectAttempts}
+                <span class="text-sm opacity-90 mt-1">Reconnecting ({reconnectAttempts}/{maxReconnectAttempts})...</span>
+            {:else}
+                <span class="text-sm opacity-90 mt-1">
+                    Please check if Docker is running and accessible.
+                    <button 
+                        class="underline ml-1 hover:text-white/80 transition-colors" 
+                        on:click={() => window.location.reload()}
+                    >
+                        Refresh page
+                    </button>
+                </span>
+            {/if}
+        </div>
+        <button 
+            class="ml-3 text-white/80 hover:text-white transition-colors"
+            on:click={() => connectionError = false}
+        >
+            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clip-rule="evenodd" />
+            </svg>
+        </button>
     </div>
     {/if}
 </main>

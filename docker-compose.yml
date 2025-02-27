@@ -16,8 +16,11 @@ services:
       - monitor-network
     environment:
       - PYTHONUNBUFFERED=1
+      # Comentamos DOCKER_HOST para Windows, ya que puede causar problemas
+      # - DOCKER_HOST=unix:///var/run/docker.sock
+      - DEBUG=1
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/containers"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/containers || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -27,6 +30,9 @@ services:
         limits:
           cpus: '0.50'
           memory: 512M
+    # En Windows, no necesitamos privileged ni user root
+    # privileged: true
+    # user: root
 
   frontend:
     build:
@@ -36,17 +42,16 @@ services:
     ports:
       - "4173:4173"
     environment:
-      - PUBLIC_API_URL=${PUBLIC_API_URL}
-      - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL}
-      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-http://localhost:5000}
+      - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL:-http://localhost:5000}
+      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL:-5000}
     depends_on:
-      backend:
-        condition: service_healthy
+      - backend
     restart: always
     networks:
       - monitor-network
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4173"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4173 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
