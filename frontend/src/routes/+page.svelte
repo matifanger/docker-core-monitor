@@ -49,6 +49,8 @@
         function handleDragStart(event: DragEvent) {
             if (!event.dataTransfer) return;
             
+            startDragging();
+            
             event.dataTransfer.effectAllowed = 'move';
             event.dataTransfer.setData('text/plain', JSON.stringify(state));
             
@@ -69,6 +71,7 @@
         
         function handleDragEnd() {
             node.classList.remove('dragging');
+            stopDragging();
         }
         
         node.addEventListener('dragstart', handleDragStart);
@@ -112,9 +115,12 @@
             
             try {
                 const data = JSON.parse(event.dataTransfer.getData('text/plain'));
+                startEditing(); // Prevent updates during the drop operation
                 options.onDrop(data);
+                setTimeout(() => stopEditing(), 500); // Give time for the operation to complete
             } catch (e) {
                 console.error('Error parsing drag data', e);
+                stopEditing();
             }
         }
         
@@ -164,6 +170,9 @@
     let isDragging = false;
     let draggedContainer: Container | null = null;
     
+    // Flag to prevent updates during editing or dragging
+    let isUserInteracting = false;
+    
     // Sort options
     type SortField = "memory" | "cpu" | "name" | "network_rx" | "network_tx" | "io_read" | "io_write" | "uptime" | "status";
     type SortDirection = "asc" | "desc";
@@ -190,14 +199,69 @@
     let groupedContainers: Record<string, Container[]> = {};
 
     async function fetchContainers() {
-        const res = await fetch(`${API_URL}/containers`);
-        containers = await res.json();
+        // Skip if user is interacting with the UI
+        if (isUserInteracting) {
+            console.log("Skipping container fetch while user is interacting");
+            return;
+        }
+        
+        try {
+            const res = await fetch(`${API_URL}/containers`);
+            if (!res.ok) {
+                console.error("Failed to fetch containers");
+                return;
+            }
+            
+            containers = await res.json();
+            
+            // Update grouped containers
+            updateGroupedContainers();
+        } catch (e) {
+            console.error("Error fetching containers", e);
+        }
+    }
+    
+    // Helper function to update grouped containers
+    function updateGroupedContainers() {
+        // Skip if user is interacting with the UI
+        if (isUserInteracting) {
+            return;
+        }
+        
+        // Ensure containers is defined
+        if (!containers || containers.length === 0) {
+            groupedContainers = {};
+            return;
+        }
+        
+        groupedContainers = containers.reduce((acc: Record<string, Container[]>, container) => {
+            const groupName = getContainerGroup(container.id);
+            if (!acc[groupName]) {
+                acc[groupName] = [];
+            }
+            acc[groupName].push(container);
+            return acc;
+        }, {});
     }
 
     async function fetchCustomNames() {
+        // Skip if user is interacting with the UI
+        if (isUserInteracting) {
+            console.log("Skipping custom names fetch while user is interacting");
+            return;
+        }
+        
         try {
             const res = await fetch(`${API_URL}/custom-names`);
+            if (!res.ok) {
+                console.error("Failed to fetch custom names");
+                return;
+            }
+            
             customNames = await res.json();
+            
+            // Update grouped containers to reflect any changes in container groups
+            updateGroupedContainers();
         } catch (e) {
             console.error("Failed to fetch custom names", e);
         }
@@ -205,6 +269,9 @@
     
     async function updateContainerName(containerId: string, name: string) {
         try {
+            // Start editing mode
+            startEditing();
+            
             // Store original name for potential rollback
             const originalName = containers.find(c => c.id === containerId)?.name;
             
@@ -245,30 +312,38 @@
                             ...customNames.containers
                         }
                     };
-                    delete customNames.containers[containerId];
                     
-                    // Revert container name in UI
+                    if (containerId in customNames.containers) {
+                        delete customNames.containers[containerId];
+                    }
+                    
                     containers = containers.map(c => 
                         c.id === containerId ? { ...c, name: originalName } : c
                     );
                 }
             }
+            
+            // End editing mode
+            stopEditing();
         } catch (e) {
             console.error("Error updating container name", e);
+            stopEditing();
         }
     }
     
-    async function updateGroupName(originalName: string, newName: string) {
+    async function updateGroupName(groupName: string, name: string) {
         try {
-            // Store previous name for potential rollback
-            const previousName = customNames.groups[originalName];
+            startEditing();
+            
+            // Store original name for potential rollback
+            const originalName = customNames.groups[groupName] || groupName;
             
             // Update local state immediately
             customNames = {
                 ...customNames,
                 groups: {
                     ...customNames.groups,
-                    [originalName]: newName
+                    [groupName]: name
                 }
             };
             
@@ -277,45 +352,46 @@
             editingName = '';
             
             // Then update on the server
-            const res = await fetch(`${API_URL}/custom-names/group/${originalName}`, {
+            const res = await fetch(`${API_URL}/custom-names/group/${groupName}`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ name: newName })
+                body: JSON.stringify({ name })
             });
             
             if (!res.ok) {
                 console.error("Failed to update group name");
                 // Revert local state if server update fails
-                if (previousName) {
-                    customNames = {
-                        ...customNames,
-                        groups: {
-                            ...customNames.groups,
-                            [originalName]: previousName
-                        }
-                    };
-                } else {
-                    customNames = {
-                        ...customNames,
-                        groups: {
-                            ...customNames.groups
-                        }
-                    };
-                    delete customNames.groups[originalName];
+                customNames = {
+                    ...customNames,
+                    groups: {
+                        ...customNames.groups
+                    }
+                };
+                
+                if (groupName in customNames.groups) {
+                    delete customNames.groups[groupName];
+                }
+                
+                if (originalName !== groupName) {
+                    customNames.groups[groupName] = originalName;
                 }
             }
+            
+            stopEditing();
         } catch (e) {
             console.error("Error updating group name", e);
+            stopEditing();
         }
     }
     
     async function resetContainerName(containerId: string) {
         try {
-            // Store the custom name for potential rollback
-            const customName = customNames.containers[containerId];
-            const originalName = containers.find(c => c.id === containerId)?.name;
+            startEditing();
+            
+            // Store original name for potential rollback
+            const originalName = customNames.containers[containerId];
             
             // Update local state immediately
             customNames = {
@@ -324,12 +400,14 @@
                     ...customNames.containers
                 }
             };
+            
             delete customNames.containers[containerId];
             
-            // Update container name in UI immediately if we know the original name
-            if (originalName) {
+            // Update container name in the UI immediately
+            const container = containers.find(c => c.id === containerId);
+            if (container) {
                 containers = containers.map(c => 
-                    c.id === containerId ? { ...c, name: originalName } : c
+                    c.id === containerId ? { ...c, name: c.name } : c
                 );
             }
             
@@ -341,30 +419,35 @@
             if (!res.ok) {
                 console.error("Failed to reset container name");
                 // Revert local state if server update fails
-                if (customName) {
+                if (originalName) {
                     customNames = {
                         ...customNames,
                         containers: {
                             ...customNames.containers,
-                            [containerId]: customName
+                            [containerId]: originalName
                         }
                     };
                     
                     // Revert container name in UI
                     containers = containers.map(c => 
-                        c.id === containerId ? { ...c, name: customName } : c
+                        c.id === containerId ? { ...c, name: originalName } : c
                     );
                 }
             }
+            
+            stopEditing();
         } catch (e) {
             console.error("Error resetting container name", e);
+            stopEditing();
         }
     }
     
     async function resetGroupName(groupName: string) {
         try {
-            // Store the custom name for potential rollback
-            const customName = customNames.groups[groupName];
+            startEditing();
+            
+            // Store original name for potential rollback
+            const originalName = customNames.groups[groupName];
             
             // Update local state immediately
             customNames = {
@@ -373,6 +456,7 @@
                     ...customNames.groups
                 }
             };
+            
             delete customNames.groups[groupName];
             
             // Then update on the server
@@ -383,32 +467,70 @@
             if (!res.ok) {
                 console.error("Failed to reset group name");
                 // Revert local state if server update fails
-                if (customName) {
+                if (originalName) {
                     customNames = {
                         ...customNames,
                         groups: {
                             ...customNames.groups,
-                            [groupName]: customName
+                            [groupName]: originalName
                         }
                     };
                 }
             }
+            
+            stopEditing();
         } catch (e) {
             console.error("Error resetting group name", e);
+            stopEditing();
         }
     }
     
     async function updateContainerGroup(containerId: string, groupName: string) {
         try {
+            startEditing();
+            
+            // Store original group for potential rollback
+            const originalGroup = customNames.container_groups[containerId] || getDefaultGroup(containerId);
+            
+            // Update local state immediately
+            customNames = {
+                ...customNames,
+                container_groups: {
+                    ...customNames.container_groups,
+                    [containerId]: groupName
+                }
+            };
+            
+            // Update groupedContainers
+            const container = containers.find(c => c.id === containerId);
+            if (container && groupedContainers) {
+                // Remove from current group
+                const currentGroup = originalGroup;
+                if (groupedContainers[currentGroup]) {
+                    groupedContainers[currentGroup] = groupedContainers[currentGroup].filter(c => c.id !== containerId);
+                    // If group is empty, remove it
+                    if (groupedContainers[currentGroup].length === 0) {
+                        delete groupedContainers[currentGroup];
+                    }
+                }
+                
+                // Add to new group
+                if (!groupedContainers[groupName]) {
+                    groupedContainers[groupName] = [];
+                }
+                groupedContainers[groupName].push(container);
+                
+                // Force reactivity update
+                groupedContainers = {...groupedContainers};
+            }
+            
+            // Then update on the server
             const res = await fetch(`${API_URL}/container-group`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ 
-                    containerId, 
-                    groupName 
-                })
+                body: JSON.stringify({ containerId, groupName })
             });
             
             if (!res.ok) {
@@ -420,24 +542,48 @@
                         ...customNames.container_groups
                     }
                 };
-                delete customNames.container_groups[containerId];
+                
+                if (containerId in customNames.container_groups) {
+                    if (originalGroup === getDefaultGroup(containerId)) {
+                        delete customNames.container_groups[containerId];
+                    } else {
+                        customNames.container_groups[containerId] = originalGroup;
+                    }
+                }
+                
+                // Revert groupedContainers
+                if (container) {
+                    // Remove from new group
+                    if (groupedContainers[groupName]) {
+                        groupedContainers[groupName] = groupedContainers[groupName].filter(c => c.id !== containerId);
+                        if (groupedContainers[groupName].length === 0) {
+                            delete groupedContainers[groupName];
+                        }
+                    }
+                    
+                    // Add back to original group
+                    if (!groupedContainers[originalGroup]) {
+                        groupedContainers[originalGroup] = [];
+                    }
+                    groupedContainers[originalGroup].push(container);
+                    
+                    // Force reactivity update
+                    groupedContainers = {...groupedContainers};
+                }
             }
+            
+            stopEditing();
         } catch (e) {
             console.error("Error updating container group", e);
-            // Revert local state if server update fails
-            customNames = {
-                ...customNames,
-                container_groups: {
-                    ...customNames.container_groups
-                }
-            };
-            delete customNames.container_groups[containerId];
+            stopEditing();
         }
     }
     
     async function resetContainerGroup(containerId: string) {
         try {
-            // Store the previous value in case we need to revert
+            startEditing();
+            
+            // Store previous group for potential rollback
             const previousGroup = customNames.container_groups[containerId];
             
             // Update local state immediately
@@ -447,9 +593,10 @@
                     ...customNames.container_groups
                 }
             };
+            
             delete customNames.container_groups[containerId];
             
-            // Manually update groupedContainers for immediate UI update
+            // Update groupedContainers
             const container = containers.find(c => c.id === containerId);
             if (container && groupedContainers && previousGroup) {
                 // Get the new group (original group based on name)
@@ -491,8 +638,8 @@
                         }
                     };
                     
-                    // Revert groupedContainers changes
-                    if (container && groupedContainers) {
+                    // Revert groupedContainers
+                    if (container) {
                         const originalGroup = container.name.split(/[-_]/)[0] || container.name;
                         
                         // Remove from original group
@@ -514,8 +661,11 @@
                     }
                 }
             }
+            
+            stopEditing();
         } catch (e) {
             console.error("Error resetting container group", e);
+            stopEditing();
         }
     }
     
@@ -545,23 +695,22 @@
     }
     
     function startEditingContainer(containerId: string, currentName: string) {
+        startEditing();
         editingContainerId = containerId;
         editingName = currentName;
-        // Close any open group editing
-        editingGroupName = null;
     }
     
-    function startEditingGroup(groupName: string, displayName: string) {
+    function startEditingGroup(groupName: string, currentName: string) {
+        startEditing();
         editingGroupName = groupName;
-        editingName = displayName;
-        // Close any open container editing
-        editingContainerId = null;
+        editingName = currentName;
     }
     
     function cancelEditing() {
         editingContainerId = null;
         editingGroupName = null;
         editingName = '';
+        stopEditing();
     }
     
     function setSortOption(field: SortField) {
@@ -589,6 +738,23 @@
         setTimeout(() => {
             showSortOptions = false;
         }, 100);
+    }
+
+    // Update isUserInteracting when editing or dragging starts/ends
+    function startEditing() {
+        isUserInteracting = true;
+    }
+    
+    function stopEditing() {
+        isUserInteracting = false;
+    }
+    
+    function startDragging() {
+        isUserInteracting = true;
+    }
+    
+    function stopDragging() {
+        isUserInteracting = false;
     }
 
     onMount(() => {
@@ -679,23 +845,26 @@
                 container_groups: Record<string, string>
             }
         }) => {
-            console.log("Received update_stats event:", data);
-            stats = data.containers || {};
-            systemInfo = data.system_info || { MemTotal: 0, NCPU: 0 };
-            customNames = data.custom_names || { containers: {}, groups: {}, container_groups: {} };
-            const totalRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
-            const totalTx = Object.values(stats).reduce((sum, stat) => sum + stat.network_tx, 0);
-            networkHistory.rx = [...networkHistory.rx.slice(-9), totalRx].slice(-10);
-            networkHistory.tx = [...networkHistory.tx.slice(-9), totalTx].slice(-10);
+            // Skip updates if user is currently interacting with the UI
+            if (isUserInteracting) {
+                console.log("Skipping update while user is interacting");
+                return;
+            }
             
-            // Force update of groupedContainers to reflect any changes in container groups
-            // This ensures the UI updates when container groups change from other clients
-            groupedContainers = (containers || []).reduce((acc: Record<string, Container[]>, container) => {
-                const groupName = getContainerGroup(container.id);
-                acc[groupName] = acc[groupName] || [];
-                acc[groupName].push(container);
-                return acc;
-            }, {});
+            // Update stats
+            stats = data.containers;
+            systemInfo = data.system_info;
+            
+            // Only update custom names if they've changed and user is not editing
+            if (!editingContainerId && !editingGroupName && !isDragging) {
+                customNames = data.custom_names;
+            }
+            
+            // Update network history
+            updateNetworkHistory();
+            
+            // Update network chart
+            updateNetworkChart();
         });
 
         intervalId = setInterval(fetchContainers, REFRESH_INTERVAL);
@@ -767,18 +936,24 @@
         return customNames.groups[groupName] || groupName;
     }
     
-    // Get the group for a container (custom or original)
-    function getContainerGroup(containerId: string): string {
+    // Helper function to get the default group for a container
+    function getDefaultGroup(containerId: string) {
         const container = containers.find(c => c.id === containerId);
-        if (!container) return "";
+        if (!container) return "Unknown";
         
-        // If there's a custom group, use it
-        if (customNames.container_groups && customNames.container_groups[containerId]) {
+        // Default group is the first part of the name before any dash or underscore
+        return container.name.split(/[-_]/)[0] || container.name;
+    }
+
+    // Helper function to get the current group for a container
+    function getContainerGroup(containerId: string) {
+        // First check if there's a custom group assignment
+        if (customNames.container_groups[containerId]) {
             return customNames.container_groups[containerId];
         }
         
-        // Otherwise use the original group (first part of the name)
-        return container.name.split(/[-_]/)[0] || container.name;
+        // Otherwise use the default grouping based on name
+        return getDefaultGroup(containerId);
     }
 
     $: {
@@ -933,6 +1108,24 @@
             }
         };
         networkChart.update('none');
+    }
+
+    // Functions to update network history and chart
+    function updateNetworkHistory() {
+        const totalRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
+        const totalTx = Object.values(stats).reduce((sum, stat) => sum + stat.network_tx, 0);
+        networkHistory.rx = [...networkHistory.rx.slice(-9), totalRx].slice(-10);
+        networkHistory.tx = [...networkHistory.tx.slice(-9), totalTx].slice(-10);
+    }
+    
+    function updateNetworkChart() {
+        if (networkChart) {
+            // Update chart data
+            networkChart.data.labels = Array(networkHistory.rx.length).fill('');
+            networkChart.data.datasets[0].data = networkHistory.rx;
+            networkChart.data.datasets[1].data = networkHistory.tx;
+            networkChart.update();
+        }
     }
 </script>
 
