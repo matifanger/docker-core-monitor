@@ -6,10 +6,11 @@ import threading
 import platform
 import concurrent.futures
 from datetime import datetime
-from flask import Flask, jsonify, request, redirect
+from flask import Flask, jsonify, request, redirect, send_from_directory
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import docker
+import requests
 
 # Set up async mode for SocketIO
 try:
@@ -36,26 +37,58 @@ logging.basicConfig(level=logging.ERROR,
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)
+# Enable CORS for all routes and origins
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
+# Configure SocketIO with ping_timeout and ping_interval to prevent disconnections
+socketio = SocketIO(
+    app, 
+    cors_allowed_origins="*", 
+    async_mode=async_mode, 
+    logger=False, 
+    engineio_logger=False,
+    ping_timeout=60,  # Increase ping timeout to 60s
+    ping_interval=25  # Increase ping interval to 25s
+)
+
+# Docker client connection settings
+DOCKER_CLIENT_TIMEOUT = 30  # 30 seconds timeout for Docker API calls
+DOCKER_MAX_POOL_SIZE = 100  # Maximum number of connections in the pool
 
 # Initialize Docker API client
 docker_api = None
-try:
-    if platform.system() == 'Windows':
-        # For Windows, use the named pipe
-        docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
-    else:
-        # For Unix-based systems, use the Unix socket
-        docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
-    
-    # Test connection
-    docker_api.ping()
-    logger.info("Successfully connected to Docker API")
-except Exception as e:
-    logger.error(f"Failed to initialize Docker API client: {e}")
-    docker_api = None
+
+def initialize_docker_client():
+    """Initialize or reinitialize the Docker client with proper timeout settings"""
+    global docker_api
+    try:
+        # Set timeout for Docker API requests
+        if platform.system() == 'Windows':
+            # For Windows, use the named pipe
+            docker_api = docker.DockerClient(
+                base_url='npipe:////./pipe/docker_engine',
+                timeout=DOCKER_CLIENT_TIMEOUT,
+                max_pool_size=DOCKER_MAX_POOL_SIZE
+            )
+        else:
+            # For Unix-based systems, use the Unix socket
+            docker_api = docker.DockerClient(
+                base_url='unix://var/run/docker.sock',
+                timeout=DOCKER_CLIENT_TIMEOUT,
+                max_pool_size=DOCKER_MAX_POOL_SIZE
+            )
+        
+        # Test connection
+        docker_api.ping()
+        logger.info("Successfully connected to Docker API")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to initialize Docker API client: {e}")
+        docker_api = None
+        return False
+
+# Initial Docker client setup
+initialize_docker_client()
 
 container_stats = {}
 
@@ -63,6 +96,8 @@ container_stats = {}
 stats = {}
 custom_names = {"containers": {}, "groups": {}, "container_groups": {}}
 monitoring_thread_running = False
+last_docker_error_time = 0
+docker_error_count = 0
 
 # Constants
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -185,7 +220,12 @@ def get_container_stats(container):
                 cpu_count = len([x for x in cpuset.split(',') if x])
         
         if container_status == "running":
-            stats = container.stats(stream=False)
+            # Use a timeout for stats call to prevent hanging
+            try:
+                stats = container.stats(stream=False)
+            except requests.exceptions.ReadTimeout:
+                logger.warning(f"Timeout getting stats for container {container_name}")
+                raise ValueError("Stats request timed out")
             
             # Check if stats is None or doesn't have required fields
             if not stats:
@@ -279,16 +319,36 @@ def get_container_stats(container):
         })
 
 def fetch_container_stats():
-    global stats
+    global stats, docker_api, docker_error_count, last_docker_error_time
     try:
         if docker_api is None:
-            logger.error("Docker API client is not initialized. Cannot fetch stats.")
-            return {}
-            
-        containers = docker_api.containers.list(all=True)
+            # Try to reinitialize Docker client if it's None
+            if not initialize_docker_client():
+                logger.error("Docker API client is not initialized. Cannot fetch stats.")
+                return {}
         
-        # Get stats for each container in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Check if we need to reconnect to Docker
+        if docker_error_count > 5:
+            current_time = time.time()
+            # If we've had multiple errors and it's been at least 30 seconds since the last reconnection attempt
+            if current_time - last_docker_error_time > 30:
+                logger.warning("Too many Docker errors, attempting to reconnect...")
+                initialize_docker_client()
+                last_docker_error_time = current_time
+                docker_error_count = 0
+        
+        try:
+            containers = docker_api.containers.list(all=True)
+            # Reset error count on successful call
+            docker_error_count = 0
+        except Exception as e:
+            logger.error(f"Error listing containers: {e}")
+            docker_error_count += 1
+            return stats  # Return last known stats instead of empty dict
+        
+        # Get stats for each container in parallel with a smaller thread pool
+        # to avoid overwhelming the system
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
             container_stats = list(executor.map(get_container_stats, containers))
         
         # Convert to dictionary
@@ -306,15 +366,18 @@ def fetch_container_stats():
         return stats
     except Exception as e:
         logger.error(f"Error fetching container stats: {e}")
-        return {}
+        docker_error_count += 1
+        return stats  # Return last known stats instead of empty dict
 
 @app.route("/start", methods=["GET"])
 def start_monitoring():
     global monitoring_thread_running
     
+    # Try to initialize Docker client if it's None
     if docker_api is None:
-        return jsonify({"status": "error", "message": "Docker API client is not initialized"}), 500
-        
+        if not initialize_docker_client():
+            return jsonify({"status": "error", "message": "Docker API client is not initialized"}), 500
+    
     if not monitoring_thread_running:
         monitoring_thread_running = True
         thread = threading.Thread(target=monitoring_thread)
@@ -323,14 +386,29 @@ def start_monitoring():
         
     return jsonify({"status": "ok"})
 
-@app.route("/containers", methods=["GET"])
-def get_containers():
+@app.route("/api/containers", methods=["GET"])
+def get_containers_api():
+    global docker_api, docker_error_count
     try:
+        # Try to initialize Docker client if it's None
         if docker_api is None:
-            logger.error("Docker API client is not initialized. Cannot get containers.")
-            return jsonify({"error": "Docker API client is not initialized. Please make sure Docker is running and accessible."}), 500
-            
-        containers = docker_api.containers.list(all=True)
+            if not initialize_docker_client():
+                logger.error("Docker API client is not initialized. Cannot get containers.")
+                return jsonify({"error": "Docker API client is not initialized. Please make sure Docker is running and accessible."}), 500
+        
+        try:
+            containers = docker_api.containers.list(all=True)
+            # Reset error count on successful call
+            docker_error_count = 0
+        except Exception as e:
+            logger.error(f"Error listing containers: {e}")
+            docker_error_count += 1
+            # Try to reconnect
+            if initialize_docker_client():
+                containers = docker_api.containers.list(all=True)
+            else:
+                return jsonify({"error": "Failed to connect to Docker API"}), 500
+        
         container_list = []
         
         for c in containers:
@@ -465,6 +543,12 @@ def handle_connect():
                 }
             except Exception as e:
                 logger.error(f"Error getting system info: {e}")
+                # Try to reconnect
+                if initialize_docker_client():
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
         
         # Send initial data
         emit("update_stats", {
@@ -482,15 +566,27 @@ def handle_connect():
 
 def monitoring_thread():
     """Thread that continuously fetches container stats and emits them via Socket.IO"""
-    while True:
+    global docker_api, monitoring_thread_running
+    
+    # Keep track of consecutive errors
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    
+    while monitoring_thread_running:
         try:
+            # Check if Docker client needs to be reinitialized
             if docker_api is None:
-                logger.error("Docker API client is not initialized. Cannot fetch stats.")
-                time.sleep(5)  # Wait a bit longer when there's an error
-                continue
-                
+                if not initialize_docker_client():
+                    logger.error("Docker API client is not initialized. Cannot fetch stats.")
+                    time.sleep(5)  # Wait a bit longer when there's an error
+                    consecutive_errors += 1
+                    continue
+            
             # Fetch container stats
             stats_data = fetch_container_stats()
+            
+            # Reset consecutive errors counter on success
+            consecutive_errors = 0
             
             # Add system information as metadata
             try:
@@ -506,10 +602,19 @@ def monitoring_thread():
                     }
             except Exception as e:
                 logger.error(f"Error getting system info: {e}")
-                system_info = {
-                    "MemTotal": 0,
-                    "NCPU": 0
-                }
+                consecutive_errors += 1
+                
+                # Try to reconnect to Docker
+                if initialize_docker_client():
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+                else:
+                    system_info = {
+                        "MemTotal": 0,
+                        "NCPU": 0
+                    }
             
             # Send the data in the format expected by the frontend
             socketio.emit("update_stats", {
@@ -520,8 +625,17 @@ def monitoring_thread():
             
             # Sleep for a bit before the next update
             time.sleep(2)
+            
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
+            consecutive_errors += 1
+            
+            # If we have too many consecutive errors, try to reconnect to Docker
+            if consecutive_errors >= max_consecutive_errors:
+                logger.warning(f"Too many consecutive errors ({consecutive_errors}), attempting to reconnect to Docker...")
+                initialize_docker_client()
+                consecutive_errors = 0
+                
             time.sleep(2)
 
 # Start monitoring thread when app starts
@@ -537,10 +651,22 @@ try:
 except Exception as e:
     logger.error(f"Failed to start monitoring thread: {e}")
 
-# Root route handler
+# Health check endpoint
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Simple health check endpoint to verify the server is running"""
+    return jsonify({"status": "ok", "docker_connected": docker_api is not None})
+
+# Root route handler - proxy requests to the frontend
 @app.route("/", methods=["GET"])
 def root():
     return redirect("/containers")
+
+# Frontend route for containers - this is the key fix
+# This route will catch requests to /containers from the frontend
+@app.route("/containers", methods=["GET"])
+def containers_frontend():
+    return get_containers_api()
 
 # Favicon route handler
 @app.route("/favicon.ico", methods=["GET"])
@@ -549,7 +675,12 @@ def favicon():
 
 if __name__ == "__main__":
     if async_mode == 'eventlet':
-        eventlet.wsgi.server(eventlet.listen(('0.0.0.0', 5000)), app)
+        # The timeout parameter isn't supported in this version of eventlet
+        # Use socket_timeout instead which is the correct parameter
+        listener = eventlet.listen(('0.0.0.0', 5000))
+        # Set socket timeout on the listener
+        listener.settimeout(120)
+        eventlet.wsgi.server(listener, app)
     elif async_mode == 'gevent':
         http_server = WSGIServer(('0.0.0.0', 5000), app)
         http_server.serve_forever()
