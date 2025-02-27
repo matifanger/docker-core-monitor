@@ -189,6 +189,13 @@
     // Make groupedContainers a writable variable
     let groupedContainers: Record<string, Container[]> = {};
 
+    // Add connection status variables
+    let isConnected = false;
+    let connectionError = false;
+    let reconnectAttempts = 0;
+    let maxReconnectAttempts = 5;
+    let reconnectInterval: number | null = null;
+
     async function fetchContainers() {
         const res = await fetch(`${API_URL}/containers`);
         containers = await res.json();
@@ -645,10 +652,79 @@
             }
         });
 
-        const socket = io(SOCKET_URL);
+        const socket = io(SOCKET_URL, {
+            reconnection: true,
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            timeout: 20000
+        });
+        
         socket.on("connect", () => {
             console.log("Connected to WebSocket");
+            isConnected = true;
+            connectionError = false;
+            reconnectAttempts = 0;
+            
+            // Clear any existing reconnect interval
+            if (reconnectInterval) {
+                clearInterval(reconnectInterval);
+                reconnectInterval = null;
+            }
         });
+        
+        socket.on("connect_error", (error) => {
+            console.error("Socket connection error:", error);
+            connectionError = true;
+            isConnected = false;
+            
+            // If we're not already trying to reconnect, start trying
+            if (!reconnectInterval && reconnectAttempts < maxReconnectAttempts) {
+                reconnectInterval = setInterval(() => {
+                    reconnectAttempts++;
+                    console.log(`Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
+                    
+                    if (reconnectAttempts >= maxReconnectAttempts) {
+                        if (reconnectInterval) {
+                            clearInterval(reconnectInterval);
+                            reconnectInterval = null;
+                        }
+                    } else {
+                        // Try to reconnect
+                        socket.connect();
+                    }
+                }, 5000) as unknown as number;
+            }
+        });
+        
+        socket.on("disconnect", (reason) => {
+            console.log("Disconnected from WebSocket:", reason);
+            isConnected = false;
+            
+            // If the disconnection wasn't initiated by the client, try to reconnect
+            if (reason !== "io client disconnect") {
+                connectionError = true;
+                
+                // If we're not already trying to reconnect, start trying
+                if (!reconnectInterval && reconnectAttempts < maxReconnectAttempts) {
+                    reconnectInterval = setInterval(() => {
+                        reconnectAttempts++;
+                        console.log(`Reconnect attempt ${reconnectAttempts}/${maxReconnectAttempts}`);
+                        
+                        if (reconnectAttempts >= maxReconnectAttempts) {
+                            if (reconnectInterval) {
+                                clearInterval(reconnectInterval);
+                                reconnectInterval = null;
+                            }
+                        } else {
+                            // Try to reconnect
+                            socket.connect();
+                        }
+                    }, 5000) as unknown as number;
+                }
+            }
+        });
+        
         socket.on("update_stats", (data: { 
             containers: Record<string, Stats>, 
             system_info: { MemTotal: number, NCPU: number },
@@ -682,6 +758,7 @@
             socket.disconnect();
             if (intervalId) clearInterval(intervalId);
             if (networkChart) networkChart.destroy();
+            if (reconnectInterval) clearInterval(reconnectInterval);
             document.removeEventListener('click', handleDocumentClick);
         };
     });
@@ -1373,6 +1450,16 @@
         <div class="absolute inset-0 bg-gradient-to-b from-gray-950 to-gray-900 opacity-90"></div>
         <div class="absolute top-0 left-0 w-full h-full bg-[radial-gradient(circle_at_50%_50%,rgba(0,255,204,0.1),transparent_70%)]"></div>
     </div>
+
+    <!-- Add connection status indicator -->
+    {#if connectionError}
+    <div class="fixed bottom-4 right-4 bg-red-600 text-white px-4 py-2 rounded-md shadow-lg z-50 flex items-center">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clip-rule="evenodd" />
+        </svg>
+        <span>Connection error. {reconnectAttempts < maxReconnectAttempts ? `Reconnecting (${reconnectAttempts}/${maxReconnectAttempts})...` : 'Please refresh the page.'}</span>
+    </div>
+    {/if}
 </main>
 
 <style>
