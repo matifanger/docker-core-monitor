@@ -11,22 +11,11 @@ services:
       - docker-monitor-data:/app/data
     ports:
       - "5000:5000"
-    restart: always
+    restart: unless-stopped
     networks:
       - monitor-network
     environment:
       - PYTHONUNBUFFERED=1
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/containers"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.50'
-          memory: 512M
 
   frontend:
     build:
@@ -40,22 +29,10 @@ services:
       - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL}
       - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL}
     depends_on:
-      backend:
-        condition: service_healthy
-    restart: always
+      - backend
+    restart: unless-stopped
     networks:
       - monitor-network
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:4173"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 20s
-    deploy:
-      resources:
-        limits:
-          cpus: '0.30'
-          memory: 256M
 
 networks:
   monitor-network:

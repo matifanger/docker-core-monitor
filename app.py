@@ -10,9 +10,6 @@ from flask import Flask, jsonify, request, redirect
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import docker
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 # Set up async mode for SocketIO
 try:
@@ -43,37 +40,15 @@ CORS(app)
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger=False, engineio_logger=False)
 
-# Initialize Docker API client with timeout and connection pooling
+# Initialize Docker API client
 docker_api = None
 try:
-    # Configure connection pooling with retries
-    session = requests.Session()
-    retry_strategy = Retry(
-        total=3,
-        backoff_factor=0.5,
-        status_forcelist=[500, 502, 503, 504],
-        allowed_methods=["GET", "POST"]
-    )
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
-    
     if platform.system() == 'Windows':
         # For Windows, use the named pipe
-        docker_api = docker.DockerClient(
-            base_url='npipe:////./pipe/docker_engine',
-            timeout=30  # 30 second timeout
-        )
-        docker_api.api._custom_adapter = adapter
-        docker_api.api._custom_adapter.mount('http://', adapter)
-        docker_api.api._custom_adapter.mount('https://', adapter)
+        docker_api = docker.DockerClient(base_url='npipe:////./pipe/docker_engine')
     else:
         # For Unix-based systems, use the Unix socket
-        docker_api = docker.DockerClient(
-            base_url='unix://var/run/docker.sock',
-            timeout=30  # 30 second timeout
-        )
-        docker_api.api._custom_adapter = adapter
-        docker_api.api._custom_adapter.mount('http://', adapter)
-        docker_api.api._custom_adapter.mount('https://', adapter)
+        docker_api = docker.DockerClient(base_url='unix://var/run/docker.sock')
     
     # Test connection
     docker_api.ping()
@@ -210,85 +185,65 @@ def get_container_stats(container):
                 cpu_count = len([x for x in cpuset.split(',') if x])
         
         if container_status == "running":
-            try:
-                # Add timeout to stats call
-                stats = container.stats(stream=False)
+            stats = container.stats(stream=False)
+            
+            # Check if stats is None or doesn't have required fields
+            if not stats:
+                logger.error(f"No stats available for container {container_name}")
+                raise ValueError("No stats available")
                 
-                # Check if stats is None or doesn't have required fields
-                if not stats:
-                    logger.error(f"No stats available for container {container_name}")
-                    raise ValueError("No stats available")
-                    
-                # Get memory stats with safe fallbacks
-                memory_stats = stats.get("memory_stats", {})
+            # Get memory stats with safe fallbacks
+            memory_stats = stats.get("memory_stats", {})
+            
+            # Get network stats with safe fallbacks
+            networks = stats.get("networks", {})
+            network_stats = networks.get("eth0", {}) if networks else {}
+            rx_bytes = network_stats.get("rx_bytes", 0)
+            tx_bytes = network_stats.get("tx_bytes", 0)
+            
+            # Get block IO stats with safe fallbacks
+            blkio_stats = stats.get("blkio_stats", {})
+            io_service_bytes = blkio_stats.get("io_service_bytes_recursive", [])
+            
+            # Check if io_service_bytes is None before iterating
+            if io_service_bytes is None:
+                io_read = 0
+                io_write = 0
+            else:
+                io_read = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Read")
+                io_write = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Write")
+            
+            # Check for CPU stats
+            cpu_stats = stats.get("cpu_stats", {})
+            precpu_stats = stats.get("precpu_stats", {})
+            
+            # Safe CPU calculation
+            if "online_cpus" in cpu_stats:
+                cpu_count = cpu_stats.get("online_cpus", 0)
+            else:
+                cpu_count = 0
                 
-                # Get network stats with safe fallbacks
-                networks = stats.get("networks", {})
-                network_stats = networks.get("eth0", {}) if networks else {}
-                rx_bytes = network_stats.get("rx_bytes", 0)
-                tx_bytes = network_stats.get("tx_bytes", 0)
+            # Verificar si hay un límite de memoria real
+            memory_limit = memory_stats.get("limit", 0)
+            # Si el límite es igual al total del host, consideramos que no hay límite
+            if docker_api and memory_limit == docker_api.info().get("MemTotal", 0):
+                memory_limit = 0
                 
-                # Get block IO stats with safe fallbacks
-                blkio_stats = stats.get("blkio_stats", {})
-                io_service_bytes = blkio_stats.get("io_service_bytes_recursive", [])
-                
-                # Check if io_service_bytes is None before iterating
-                if io_service_bytes is None:
-                    io_read = 0
-                    io_write = 0
-                else:
-                    io_read = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Read")
-                    io_write = sum(b.get("value", 0) for b in io_service_bytes if b.get("op") == "Write")
-                
-                # Check for CPU stats
-                cpu_stats = stats.get("cpu_stats", {})
-                precpu_stats = stats.get("precpu_stats", {})
-                
-                # Safe CPU calculation
-                if "online_cpus" in cpu_stats:
-                    cpu_count = cpu_stats.get("online_cpus", 0)
-                else:
-                    cpu_count = 0
-                    
-                # Verificar si hay un límite de memoria real
-                memory_limit = memory_stats.get("limit", 0)
-                # Si el límite es igual al total del host, consideramos que no hay límite
-                if docker_api and memory_limit == docker_api.info().get("MemTotal", 0):
-                    memory_limit = 0
-                    
-                return (container_id, {
-                    "name": container_name,
-                    "status": container_status,
-                    "cpu_percent": calculate_cpu_percent(stats) if cpu_stats and precpu_stats else 0.0,
-                    "cpu_count": cpu_count,
-                    "cpu_limit": cpu_limit,
-                    "cpu_shares": cpu_shares,
-                    "memory_usage": memory_stats.get("usage", 0),
-                    "memory_limit": memory_limit,
-                    "network_rx": rx_bytes,
-                    "network_tx": tx_bytes,
-                    "io_read": io_read,
-                    "io_write": io_write,
-                    "uptime": uptime
-                })
-            except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-                logger.error(f"Timeout or connection error getting stats for {container_name}: {e}")
-                return (container_id, {
-                    "name": container_name,
-                    "status": "error",
-                    "error_message": "Timeout getting stats",
-                    "cpu_percent": 0.0,
-                    "cpu_count": 0,
-                    "cpu_limit": None,
-                    "cpu_shares": None,
-                    "memory_usage": 0,
-                    "memory_limit": 0,
-                    "network_rx": 0,
-                    "network_tx": 0,
-                    "io_read": 0,
-                    "io_write": 0,
-                    "uptime": 0
-                })
+            return (container_id, {
+                "name": container_name,
+                "status": container_status,
+                "cpu_percent": calculate_cpu_percent(stats) if cpu_stats and precpu_stats else 0.0,
+                "cpu_count": cpu_count,
+                "cpu_limit": cpu_limit,
+                "cpu_shares": cpu_shares,
+                "memory_usage": memory_stats.get("usage", 0),
+                "memory_limit": memory_limit,
+                "network_rx": rx_bytes,
+                "network_tx": tx_bytes,
+                "io_read": io_read,
+                "io_write": io_write,
+                "uptime": uptime
+            })
         else:
             return (container_id, {
                 "name": container_name,
@@ -310,7 +265,6 @@ def get_container_stats(container):
         return (container_id, {
             "name": container_name,
             "status": "error",
-            "error_message": str(e),
             "cpu_percent": 0.0,
             "cpu_count": 0,
             "cpu_limit": None,
@@ -331,61 +285,11 @@ def fetch_container_stats():
             logger.error("Docker API client is not initialized. Cannot fetch stats.")
             return {}
             
-        try:
-            # Add timeout to containers.list call
-            containers = docker_api.containers.list(all=True)
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            logger.error(f"Timeout or connection error listing containers: {e}")
-            # Return the last known stats instead of empty dict to prevent UI disruption
-            return stats
+        containers = docker_api.containers.list(all=True)
         
-        # Get stats for each container in parallel with a timeout
+        # Get stats for each container in parallel
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(get_container_stats, container): container for container in containers}
-            container_stats = []
-            
-            for future in concurrent.futures.as_completed(futures, timeout=25):  # 25 second timeout
-                try:
-                    result = future.result()
-                    container_stats.append(result)
-                except concurrent.futures.TimeoutError:
-                    container = futures[future]
-                    logger.error(f"Timeout getting stats for container {container.name}")
-                    container_stats.append((container.id, {
-                        "name": container.name,
-                        "status": "error",
-                        "error_message": "Timeout",
-                        "cpu_percent": 0.0,
-                        "cpu_count": 0,
-                        "cpu_limit": None,
-                        "cpu_shares": None,
-                        "memory_usage": 0,
-                        "memory_limit": 0,
-                        "network_rx": 0,
-                        "network_tx": 0,
-                        "io_read": 0,
-                        "io_write": 0,
-                        "uptime": 0
-                    }))
-                except Exception as e:
-                    container = futures[future]
-                    logger.error(f"Error getting stats for container {container.name}: {e}")
-                    container_stats.append((container.id, {
-                        "name": container.name,
-                        "status": "error",
-                        "error_message": str(e),
-                        "cpu_percent": 0.0,
-                        "cpu_count": 0,
-                        "cpu_limit": None,
-                        "cpu_shares": None,
-                        "memory_usage": 0,
-                        "memory_limit": 0,
-                        "network_rx": 0,
-                        "network_tx": 0,
-                        "io_read": 0,
-                        "io_write": 0,
-                        "uptime": 0
-                    }))
+            container_stats = list(executor.map(get_container_stats, containers))
         
         # Convert to dictionary
         stats_dict = {}
@@ -402,8 +306,7 @@ def fetch_container_stats():
         return stats
     except Exception as e:
         logger.error(f"Error fetching container stats: {e}")
-        # Return the last known stats instead of empty dict
-        return stats
+        return {}
 
 @app.route("/start", methods=["GET"])
 def start_monitoring():
@@ -579,9 +482,6 @@ def handle_connect():
 
 def monitoring_thread():
     """Thread that continuously fetches container stats and emits them via Socket.IO"""
-    consecutive_errors = 0
-    max_consecutive_errors = 5
-    
     while True:
         try:
             if docker_api is None:
@@ -604,15 +504,12 @@ def monitoring_thread():
                         "MemTotal": 0,
                         "NCPU": 0
                     }
-                # Reset consecutive errors counter on success
-                consecutive_errors = 0
             except Exception as e:
                 logger.error(f"Error getting system info: {e}")
                 system_info = {
                     "MemTotal": 0,
                     "NCPU": 0
                 }
-                consecutive_errors += 1
             
             # Send the data in the format expected by the frontend
             socketio.emit("update_stats", {
@@ -621,52 +518,10 @@ def monitoring_thread():
                 "custom_names": custom_names
             })
             
-            # If we've had too many consecutive errors, recreate the Docker client
-            if consecutive_errors >= max_consecutive_errors:
-                logger.warning(f"Too many consecutive errors ({consecutive_errors}). Recreating Docker client...")
-                try:
-                    # Recreate Docker client
-                    global docker_api
-                    
-                    # Configure connection pooling with retries
-                    session = requests.Session()
-                    retry_strategy = Retry(
-                        total=3,
-                        backoff_factor=0.5,
-                        status_forcelist=[500, 502, 503, 504],
-                        allowed_methods=["GET", "POST"]
-                    )
-                    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
-                    
-                    if platform.system() == 'Windows':
-                        docker_api = docker.DockerClient(
-                            base_url='npipe:////./pipe/docker_engine',
-                            timeout=30
-                        )
-                        docker_api.api._custom_adapter = adapter
-                        docker_api.api._custom_adapter.mount('http://', adapter)
-                        docker_api.api._custom_adapter.mount('https://', adapter)
-                    else:
-                        docker_api = docker.DockerClient(
-                            base_url='unix://var/run/docker.sock',
-                            timeout=30
-                        )
-                        docker_api.api._custom_adapter = adapter
-                        docker_api.api._custom_adapter.mount('http://', adapter)
-                        docker_api.api._custom_adapter.mount('https://', adapter)
-                    
-                    # Test connection
-                    docker_api.ping()
-                    logger.info("Successfully reconnected to Docker API")
-                    consecutive_errors = 0
-                except Exception as e:
-                    logger.error(f"Failed to recreate Docker API client: {e}")
-            
             # Sleep for a bit before the next update
             time.sleep(2)
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
-            consecutive_errors += 1
             time.sleep(2)
 
 # Start monitoring thread when app starts
