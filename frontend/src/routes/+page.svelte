@@ -842,13 +842,50 @@
         const socket = io(SOCKET_URL, {
             transports: ['websocket'],
             reconnectionDelay: 200,
-            timeout: 20000
+            timeout: 20000,
+            reconnection: true,
+            reconnectionAttempts: Infinity,
+            reconnectionDelayMax: 5000,
+            autoConnect: true
         });
 
         console.warn("About to connect to server...");
 
         socket.on('connect', () => {
             console.log('Connected to server');
+            // Solicitar estadísticas inmediatamente al conectar
+            socket.emit('request_stats');
+            // Forzar una actualización de contenedores si el usuario no está interactuando
+            if (!isUserInteracting) {
+                fetchContainers();
+            }
+        });
+
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+        });
+
+        socket.on('reconnect', (attemptNumber) => {
+            console.log(`Reconnected after ${attemptNumber} attempts`);
+            // Solicitar estadísticas inmediatamente al reconectar
+            socket.emit('request_stats');
+            // Forzar una actualización de contenedores
+            if (!isUserInteracting) {
+                fetchContainers();
+            }
+        });
+
+        socket.on('reconnect_attempt', (attemptNumber) => {
+            console.log(`Reconnection attempt: ${attemptNumber}`);
+        });
+
+        socket.on('disconnect', (reason) => {
+            console.warn(`Disconnected: ${reason}`);
+            if (reason === 'io server disconnect') {
+                // El servidor cerró la conexión, intentar reconectar manualmente
+                socket.connect();
+            }
+            // Si es 'io client disconnect', entonces fue intencional y no reconectamos
         });
 
         socket.on("update_stats", (data: { 
