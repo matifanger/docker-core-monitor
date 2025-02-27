@@ -15,10 +15,16 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY app.py .
+COPY backend /app/backend
+
+# Create data directory
+RUN mkdir -p /app/data
+
+# Set working directory to backend
+WORKDIR /app/backend
 
 # Expose the port the app runs on
 EXPOSE 5000
 
-# Command to run the application with Python directly
-CMD ["python", "app.py"] 
+# Command to run the application
+CMD ["python", "run.py"] 

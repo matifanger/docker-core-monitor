@@ -1,4 +1,6 @@
+__pycache__
 node_modules
 .svelte-kit
+.env.local
 .env
-custom_names.json
+backend/data
