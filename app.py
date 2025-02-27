@@ -5,7 +5,6 @@ import logging
 import threading
 import platform
 import concurrent.futures
-import subprocess
 from datetime import datetime
 from flask import Flask, jsonify, request, redirect
 from flask_socketio import SocketIO, emit
@@ -34,68 +33,10 @@ elif async_mode == 'gevent':
     from gevent import monkey
     monkey.patch_all()
 
-# Set up logging - enable more verbose logging for debugging
-if os.environ.get('DEBUG', '0') == '1':
-    logging.basicConfig(level=logging.DEBUG, 
-                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-else:
-    logging.basicConfig(level=logging.ERROR, 
-                       format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# Configure logging - only errors and critical info
+logging.basicConfig(level=logging.ERROR, 
+                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
-
-# Log startup information
-logger.error("Starting Docker Core Monitor")
-logger.error(f"Python version: {platform.python_version()}")
-logger.error(f"Platform: {platform.system()} {platform.release()}")
-logger.error(f"Docker host: {os.environ.get('DOCKER_HOST', 'default')}")
-
-# Check Docker socket permissions
-if platform.system() != 'Windows':
-    try:
-        logger.error("Checking Docker socket permissions...")
-        if os.path.exists('/var/run/docker.sock'):
-            socket_stat = os.stat('/var/run/docker.sock')
-            logger.error(f"Docker socket exists. Permissions: {oct(socket_stat.st_mode)}, Owner: {socket_stat.st_uid}, Group: {socket_stat.st_gid}")
-            
-            # Check if we can access the socket
-            try:
-                with open('/var/run/docker.sock', 'rb') as f:
-                    logger.error("Successfully opened Docker socket for reading")
-            except Exception as e:
-                logger.error(f"Cannot open Docker socket: {e}")
-                
-            # Try to get Docker info using command line
-            try:
-                result = subprocess.run(['docker', 'info'], capture_output=True, text=True)
-                if result.returncode == 0:
-                    logger.error("Docker CLI works correctly")
-                else:
-                    logger.error(f"Docker CLI error: {result.stderr}")
-            except Exception as e:
-                logger.error(f"Failed to run Docker CLI: {e}")
-        else:
-            logger.error("Docker socket does not exist at /var/run/docker.sock")
-    except Exception as e:
-        logger.error(f"Error checking Docker socket: {e}")
-else:
-    # Windows-specific checks
-    try:
-        logger.error("Checking Docker on Windows...")
-        # Check if Docker is running using CLI
-        result = subprocess.run(['docker', 'info'], capture_output=True, text=True)
-        if result.returncode == 0:
-            logger.error("Docker CLI works correctly on Windows")
-        else:
-            logger.error(f"Docker CLI error on Windows: {result.stderr}")
-            
-        # Check if named pipe exists
-        pipe_path = r'\\.\pipe\docker_engine'
-        if os.path.exists(pipe_path):
-            logger.error(f"Docker named pipe exists at {pipe_path}")
-        else:
-            logger.error(f"Docker named pipe does not exist at {pipe_path}")
-    except Exception as e:
-        logger.error(f"Error checking Docker on Windows: {e}")
 
 app = Flask(__name__)
 CORS(app)
@@ -104,120 +45,42 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode=async_mode, logger
 
 # Initialize Docker API client with timeout and connection pooling
 docker_api = None
-
-def initialize_docker_api():
-    global docker_api
-    try:
-        # Log diagnostic information
-        logger.error(f"Platform: {platform.system()}")
-        
-        # Check for custom Docker host
-        docker_host = os.environ.get('DOCKER_HOST')
-        if docker_host:
-            logger.error(f"Using custom Docker host: {docker_host}")
-            docker_api = docker.DockerClient(
-                base_url=docker_host,
-                timeout=30
-            )
-        elif platform.system() == 'Windows':
-            # For Windows, try multiple connection methods
-            logger.error("Detected Windows platform")
-            
-            # Method 1: Try from_env first (recommended for Windows)
-            try:
-                logger.error("Trying docker.from_env() method...")
-                docker_api = docker.from_env(timeout=30)
-                # Test connection
-                docker_api.ping()
-                logger.error(f"Successfully connected using from_env(). Base URL: {docker_api.api.base_url}")
-            except Exception as e:
-                logger.error(f"from_env() method failed: {e}")
-                
-                # Method 2: Try named pipe explicitly
-                try:
-                    logger.error("Trying named pipe connection...")
-                    docker_api = docker.DockerClient(
-                        base_url='npipe:////./pipe/docker_engine',
-                        timeout=30
-                    )
-                    # Test connection
-                    docker_api.ping()
-                    logger.error("Successfully connected using named pipe")
-                except Exception as e:
-                    logger.error(f"Named pipe connection failed: {e}")
-                    
-                    # Method 3: Try TCP connection to localhost
-                    try:
-                        logger.error("Trying TCP connection to localhost...")
-                        docker_api = docker.DockerClient(
-                            base_url='tcp://localhost:2375',
-                            timeout=30
-                        )
-                        # Test connection
-                        docker_api.ping()
-                        logger.error("Successfully connected using TCP localhost")
-                    except Exception as e:
-                        logger.error(f"TCP localhost connection failed: {e}")
-                        return False
-        else:
-            # For Unix-based systems, use the Unix socket
-            logger.error("Using Unix socket for Docker connection")
-            # Check if socket file exists
-            if not os.path.exists('/var/run/docker.sock'):
-                logger.error("Docker socket file does not exist at /var/run/docker.sock")
-                return False
-                
-            docker_api = docker.DockerClient(
-                base_url='unix://var/run/docker.sock',
-                timeout=30  # 30 second timeout
-            )
-        
-        # Test connection
-        logger.error("Testing Docker connection with ping...")
-        docker_api.ping()
-        logger.error("Successfully connected to Docker API")
-        
-        # Log Docker version and info
-        version = docker_api.version()
-        logger.error(f"Docker version: {version.get('Version', 'unknown')}")
-        
-        info = docker_api.info()
-        logger.error(f"Docker info: Containers: {info.get('Containers', 'unknown')}, Images: {info.get('Images', 'unknown')}")
-        
-        return True
-    except docker.errors.DockerException as e:
-        docker_api = None
-        logger.error(f"Docker-specific error: {e}")
-        return False
-    except requests.exceptions.ConnectionError as e:
-        docker_api = None
-        logger.error(f"Connection error to Docker daemon: {e}")
-        return False
-    except Exception as e:
-        docker_api = None
-        logger.error(f"Failed to initialize Docker API client: {e}")
-        return False
-
-# Try to initialize Docker API on startup
-initialize_docker_api()
-
-# Retry Docker API initialization periodically if it failed
-def docker_api_reconnect_thread():
-    global docker_api
-    while True:
-        if docker_api is None:
-            logger.info("Attempting to reconnect to Docker API...")
-            if initialize_docker_api():
-                # If we successfully reconnected, start the monitoring thread
-                if not monitoring_thread_running:
-                    start_monitoring()
-        # Wait before trying again
-        time.sleep(30)  # Try every 30 seconds
-
-# Start the reconnection thread
-reconnect_thread = threading.Thread(target=docker_api_reconnect_thread)
-reconnect_thread.daemon = True
-reconnect_thread.start()
+try:
+    # Configure connection pooling with retries
+    session = requests.Session()
+    retry_strategy = Retry(
+        total=3,
+        backoff_factor=0.5,
+        status_forcelist=[500, 502, 503, 504],
+        allowed_methods=["GET", "POST"]
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+    
+    if platform.system() == 'Windows':
+        # For Windows, use the named pipe
+        docker_api = docker.DockerClient(
+            base_url='npipe:////./pipe/docker_engine',
+            timeout=30  # 30 second timeout
+        )
+        docker_api.api._custom_adapter = adapter
+        docker_api.api._custom_adapter.mount('http://', adapter)
+        docker_api.api._custom_adapter.mount('https://', adapter)
+    else:
+        # For Unix-based systems, use the Unix socket
+        docker_api = docker.DockerClient(
+            base_url='unix://var/run/docker.sock',
+            timeout=30  # 30 second timeout
+        )
+        docker_api.api._custom_adapter = adapter
+        docker_api.api._custom_adapter.mount('http://', adapter)
+        docker_api.api._custom_adapter.mount('https://', adapter)
+    
+    # Test connection
+    docker_api.ping()
+    logger.info("Successfully connected to Docker API")
+except Exception as e:
+    logger.error(f"Failed to initialize Docker API client: {e}")
+    docker_api = None
 
 container_stats = {}
 
@@ -562,10 +425,7 @@ def get_containers():
     try:
         if docker_api is None:
             logger.error("Docker API client is not initialized. Cannot get containers.")
-            return jsonify({
-                "error": "Docker API client is not initialized. Please make sure Docker is running and accessible.",
-                "details": "The application cannot connect to the Docker daemon. Check if Docker is running and the socket is accessible."
-            }), 503  # Service Unavailable
+            return jsonify({"error": "Docker API client is not initialized. Please make sure Docker is running and accessible."}), 500
             
         containers = docker_api.containers.list(all=True)
         container_list = []
@@ -584,24 +444,9 @@ def get_containers():
             container_list.append(container_data)
             
         return jsonify(container_list)
-    except docker.errors.APIError as e:
-        logger.error(f"Docker API error: {e}")
-        return jsonify({
-            "error": "Docker API error",
-            "details": str(e)
-        }), 500
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Connection error to Docker daemon: {e}")
-        return jsonify({
-            "error": "Connection error to Docker daemon",
-            "details": "Could not connect to the Docker daemon. Check if Docker is running."
-        }), 503
     except Exception as e:
         logger.error(f"Error getting containers: {e}")
-        return jsonify({
-            "error": "Internal server error",
-            "details": str(e)
-        }), 500
+        return jsonify({"error": str(e)}), 500
 
 # API endpoints for custom names
 @app.route("/custom-names", methods=["GET"])
@@ -706,12 +551,6 @@ def handle_connect():
         current_stats = {}
         if docker_api is not None:
             current_stats = fetch_container_stats()
-        else:
-            # Send error message if Docker API is not initialized
-            emit("error", {
-                "message": "Docker API client is not initialized. Please make sure Docker is running and accessible.",
-                "details": "The application cannot connect to the Docker daemon. Check if Docker is running and the socket is accessible."
-            })
         
         # Get system info
         system_info = {"MemTotal": 0, "NCPU": 0}
@@ -723,10 +562,6 @@ def handle_connect():
                 }
             except Exception as e:
                 logger.error(f"Error getting system info: {e}")
-                emit("error", {
-                    "message": "Error getting system information",
-                    "details": str(e)
-                })
         
         # Send initial data
         emit("update_stats", {
@@ -740,15 +575,12 @@ def handle_connect():
             start_monitoring()
     except Exception as e:
         logger.error(f"Error handling socket connection: {e}")
-        emit("error", {
-            "message": "Failed to get initial stats",
-            "details": str(e)
-        })
+        emit("error", {"message": "Failed to get initial stats"})
 
 def monitoring_thread():
     """Thread that continuously fetches container stats and emits them via Socket.IO"""
     consecutive_errors = 0
-    max_consecutive_errors = 5  # Reset Docker client after 5 consecutive errors
+    max_consecutive_errors = 5
     
     while True:
         try:
@@ -793,14 +625,42 @@ def monitoring_thread():
             if consecutive_errors >= max_consecutive_errors:
                 logger.warning(f"Too many consecutive errors ({consecutive_errors}). Recreating Docker client...")
                 try:
-                    # Recreate Docker client using the initialize_docker_api function
-                    if initialize_docker_api():
-                        logger.info("Successfully recreated Docker client")
-                        consecutive_errors = 0
+                    # Recreate Docker client
+                    global docker_api
+                    
+                    # Configure connection pooling with retries
+                    session = requests.Session()
+                    retry_strategy = Retry(
+                        total=3,
+                        backoff_factor=0.5,
+                        status_forcelist=[500, 502, 503, 504],
+                        allowed_methods=["GET", "POST"]
+                    )
+                    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+                    
+                    if platform.system() == 'Windows':
+                        docker_api = docker.DockerClient(
+                            base_url='npipe:////./pipe/docker_engine',
+                            timeout=30
+                        )
+                        docker_api.api._custom_adapter = adapter
+                        docker_api.api._custom_adapter.mount('http://', adapter)
+                        docker_api.api._custom_adapter.mount('https://', adapter)
                     else:
-                        logger.error("Failed to recreate Docker client")
+                        docker_api = docker.DockerClient(
+                            base_url='unix://var/run/docker.sock',
+                            timeout=30
+                        )
+                        docker_api.api._custom_adapter = adapter
+                        docker_api.api._custom_adapter.mount('http://', adapter)
+                        docker_api.api._custom_adapter.mount('https://', adapter)
+                    
+                    # Test connection
+                    docker_api.ping()
+                    logger.info("Successfully reconnected to Docker API")
+                    consecutive_errors = 0
                 except Exception as e:
-                    logger.error(f"Error recreating Docker client: {e}")
+                    logger.error(f"Failed to recreate Docker API client: {e}")
             
             # Sleep for a bit before the next update
             time.sleep(2)
