@@ -194,10 +194,6 @@
         containers = await res.json();
     }
 
-    async function startMonitoring() {
-        await fetch(`${API_URL}/start`);
-    }
-    
     async function fetchCustomNames() {
         try {
             const res = await fetch(`${API_URL}/custom-names`);
@@ -598,57 +594,82 @@
     onMount(() => {
         fetchContainers();
         fetchCustomNames();
-        startMonitoring();
         
         // Load sort preferences from localStorage
-        try {
-            const savedSort = localStorage.getItem("dockerCoreSort");
-            if (savedSort) {
-                const { field, direction } = JSON.parse(savedSort);
-                sortField = field;
-                sortDirection = direction;
-            }
-        } catch (e) {
-            console.error("Failed to load sort preferences", e);
+        const savedSortField = localStorage.getItem('sortField');
+        const savedSortDirection = localStorage.getItem('sortDirection');
+        const savedViewMode = localStorage.getItem('viewMode');
+        
+        if (savedSortField) {
+            sortField = savedSortField as SortField;
         }
         
-        // Load view mode from localStorage
-        try {
-            const savedViewMode = localStorage.getItem("dockerCoreViewMode");
-            if (savedViewMode) {
-                viewMode = savedViewMode as "groups" | "list";
-            }
-        } catch (e) {
-            console.error("Failed to load view mode", e);
+        if (savedSortDirection) {
+            sortDirection = savedSortDirection as SortDirection;
         }
-
-        // Add document click handler to close dropdown
-        const handleDocumentClick = (e: MouseEvent) => {
-            const sortButton = document.querySelector('.sort-button');
-            const sortDropdown = document.querySelector('.sort-dropdown');
-            
-            if (showSortOptions && sortButton && sortDropdown) {
-                if (!sortButton.contains(e.target as Node) && !sortDropdown.contains(e.target as Node)) {
-                    showSortOptions = false;
+        
+        if (savedViewMode) {
+            viewMode = savedViewMode as "groups" | "list";
+        }
+        
+        // Initialize network chart
+        const ctx = document.getElementById('networkChart') as HTMLCanvasElement;
+        if (ctx) {
+            networkChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: Array(30).fill(''),
+                    datasets: [
+                        {
+                            label: 'RX (Download)',
+                            data: Array(30).fill(0),
+                            borderColor: 'rgba(75, 192, 192, 1)',
+                            backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                            tension: 0.4,
+                            fill: true
+                        },
+                        {
+                            label: 'TX (Upload)',
+                            data: Array(30).fill(0),
+                            borderColor: 'rgba(255, 99, 132, 1)',
+                            backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                            tension: 0.4,
+                            fill: true
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            ticks: {
+                                callback: function(value) {
+                                    return formatBytes(Number(value));
+                                }
+                            }
+                        }
+                    },
+                    animation: {
+                        duration: 500
+                    }
                 }
-            }
-        };
-        
-        document.addEventListener('click', handleDocumentClick);
+            });
+        }
 
-        const canvas = document.getElementById('networkChart') as HTMLCanvasElement;
-        networkChart = new Chart(canvas, {
-            type: 'line',
-            data: {
-                labels: [],
-                datasets: []
-            }
+        const socket = io(SOCKET_URL, {
+            transports: ['websocket'],
+            reconnectionAttempts: 5,
+            reconnectionDelay: 1000,
+            timeout: 20000
         });
 
-        const socket = io(SOCKET_URL);
-        socket.on("connect", () => {
-            console.log("Connected to WebSocket");
+        socket.on('connect', () => {
+            console.log('Connected to server');
+            // No es necesario llamar a startMonitoring() aquí, el backend lo inicia automáticamente
         });
+
         socket.on("update_stats", (data: { 
             containers: Record<string, Stats>, 
             system_info: { MemTotal: number, NCPU: number },
@@ -682,7 +703,6 @@
             socket.disconnect();
             if (intervalId) clearInterval(intervalId);
             if (networkChart) networkChart.destroy();
-            document.removeEventListener('click', handleDocumentClick);
         };
     });
 

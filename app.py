@@ -369,22 +369,139 @@ def fetch_container_stats():
         docker_error_count += 1
         return stats  # Return last known stats instead of empty dict
 
-@app.route("/start", methods=["GET"])
-def start_monitoring():
+@socketio.on("connect")
+def handle_connect():
+    try:
+        # Send initial stats to new client
+        current_stats = {}
+        if docker_api is not None:
+            current_stats = fetch_container_stats()
+        
+        # Get system info
+        system_info = {"MemTotal": 0, "NCPU": 0}
+        if docker_api is not None:
+            try:
+                system_info = {
+                    "MemTotal": docker_api.info().get("MemTotal", 0),
+                    "NCPU": docker_api.info().get("NCPU", 0)
+                }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+                # Try to reconnect
+                if initialize_docker_client():
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+        
+        # Send initial data
+        emit("update_stats", {
+            "containers": current_stats,
+            "system_info": system_info,
+            "custom_names": custom_names
+        })
+        
+        # Make sure monitoring thread is running - call start_monitoring_internal directly
+        # instead of relying on the frontend to call the /start endpoint
+        if docker_api is not None:
+            # Call the internal function directly instead of the endpoint
+            start_monitoring_internal()
+    except Exception as e:
+        logger.error(f"Error handling socket connection: {e}")
+        emit("error", {"message": "Failed to get initial stats"})
+
+def monitoring_thread():
+    """Thread that continuously fetches container stats and emits them via Socket.IO"""
+    global docker_api, monitoring_thread_running
+    
+    # Keep track of consecutive errors
+    consecutive_errors = 0
+    max_consecutive_errors = 10
+    
+    while monitoring_thread_running:
+        try:
+            # Check if Docker client needs to be reinitialized
+            if docker_api is None:
+                if not initialize_docker_client():
+                    logger.error("Docker API client is not initialized. Cannot fetch stats.")
+                    time.sleep(5)  # Wait a bit longer when there's an error
+                    consecutive_errors += 1
+                    continue
+            
+            # Fetch container stats
+            stats_data = fetch_container_stats()
+            
+            # Reset consecutive errors counter on success
+            consecutive_errors = 0
+            
+            # Add system information as metadata
+            try:
+                if docker_api:
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+                else:
+                    system_info = {
+                        "MemTotal": 0,
+                        "NCPU": 0
+                    }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+                consecutive_errors += 1
+                
+                # Try to reconnect to Docker
+                if initialize_docker_client():
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+                else:
+                    system_info = {
+                        "MemTotal": 0,
+                        "NCPU": 0
+                    }
+            
+            # Send the data in the format expected by the frontend
+            socketio.emit("update_stats", {
+                "containers": stats_data,
+                "system_info": system_info,
+                "custom_names": custom_names
+            })
+            
+            # Sleep for a bit before the next update
+            time.sleep(2)
+            
+        except Exception as e:
+            logger.error(f"Error in monitoring thread: {e}")
+            consecutive_errors += 1
+            
+            # If we have too many consecutive errors, try to reconnect to Docker
+            if consecutive_errors >= max_consecutive_errors:
+                logger.warning(f"Too many consecutive errors ({consecutive_errors}), attempting to reconnect to Docker...")
+                initialize_docker_client()
+                consecutive_errors = 0
+                
+            time.sleep(2)
+
+# Internal function to start monitoring (not exposed as an endpoint)
+def start_monitoring_internal():
     global monitoring_thread_running
     
     # Try to initialize Docker client if it's None
     if docker_api is None:
         if not initialize_docker_client():
-            return jsonify({"status": "error", "message": "Docker API client is not initialized"}), 500
+            logger.error("Docker API client is not initialized. Cannot start monitoring.")
+            return False
     
     if not monitoring_thread_running:
         monitoring_thread_running = True
         thread = threading.Thread(target=monitoring_thread)
         thread.daemon = True
         thread.start()
-        
-    return jsonify({"status": "ok"})
+        logger.info("Monitoring thread started internally")
+    
+    return True
 
 @app.route("/api/containers", methods=["GET"])
 def get_containers_api():
@@ -524,132 +641,6 @@ def reset_container_group(container_id):
     except Exception as e:
         logger.error(f"Error resetting container group: {e}")
         return jsonify({"error": str(e)}), 500
-
-@socketio.on("connect")
-def handle_connect():
-    try:
-        # Send initial stats to new client
-        current_stats = {}
-        if docker_api is not None:
-            current_stats = fetch_container_stats()
-        
-        # Get system info
-        system_info = {"MemTotal": 0, "NCPU": 0}
-        if docker_api is not None:
-            try:
-                system_info = {
-                    "MemTotal": docker_api.info().get("MemTotal", 0),
-                    "NCPU": docker_api.info().get("NCPU", 0)
-                }
-            except Exception as e:
-                logger.error(f"Error getting system info: {e}")
-                # Try to reconnect
-                if initialize_docker_client():
-                    system_info = {
-                        "MemTotal": docker_api.info().get("MemTotal", 0),
-                        "NCPU": docker_api.info().get("NCPU", 0)
-                    }
-        
-        # Send initial data
-        emit("update_stats", {
-            "containers": current_stats,
-            "system_info": system_info,
-            "custom_names": custom_names
-        })
-        
-        # Make sure monitoring thread is running
-        if docker_api is not None:
-            start_monitoring()
-    except Exception as e:
-        logger.error(f"Error handling socket connection: {e}")
-        emit("error", {"message": "Failed to get initial stats"})
-
-def monitoring_thread():
-    """Thread that continuously fetches container stats and emits them via Socket.IO"""
-    global docker_api, monitoring_thread_running
-    
-    # Keep track of consecutive errors
-    consecutive_errors = 0
-    max_consecutive_errors = 10
-    
-    while monitoring_thread_running:
-        try:
-            # Check if Docker client needs to be reinitialized
-            if docker_api is None:
-                if not initialize_docker_client():
-                    logger.error("Docker API client is not initialized. Cannot fetch stats.")
-                    time.sleep(5)  # Wait a bit longer when there's an error
-                    consecutive_errors += 1
-                    continue
-            
-            # Fetch container stats
-            stats_data = fetch_container_stats()
-            
-            # Reset consecutive errors counter on success
-            consecutive_errors = 0
-            
-            # Add system information as metadata
-            try:
-                if docker_api:
-                    system_info = {
-                        "MemTotal": docker_api.info().get("MemTotal", 0),
-                        "NCPU": docker_api.info().get("NCPU", 0)
-                    }
-                else:
-                    system_info = {
-                        "MemTotal": 0,
-                        "NCPU": 0
-                    }
-            except Exception as e:
-                logger.error(f"Error getting system info: {e}")
-                consecutive_errors += 1
-                
-                # Try to reconnect to Docker
-                if initialize_docker_client():
-                    system_info = {
-                        "MemTotal": docker_api.info().get("MemTotal", 0),
-                        "NCPU": docker_api.info().get("NCPU", 0)
-                    }
-                else:
-                    system_info = {
-                        "MemTotal": 0,
-                        "NCPU": 0
-                    }
-            
-            # Send the data in the format expected by the frontend
-            socketio.emit("update_stats", {
-                "containers": stats_data,
-                "system_info": system_info,
-                "custom_names": custom_names
-            })
-            
-            # Sleep for a bit before the next update
-            time.sleep(2)
-            
-        except Exception as e:
-            logger.error(f"Error in monitoring thread: {e}")
-            consecutive_errors += 1
-            
-            # If we have too many consecutive errors, try to reconnect to Docker
-            if consecutive_errors >= max_consecutive_errors:
-                logger.warning(f"Too many consecutive errors ({consecutive_errors}), attempting to reconnect to Docker...")
-                initialize_docker_client()
-                consecutive_errors = 0
-                
-            time.sleep(2)
-
-# Start monitoring thread when app starts
-try:
-    if docker_api is not None:
-        monitoring_thread_running = True
-        thread = threading.Thread(target=monitoring_thread)
-        thread.daemon = True
-        thread.start()
-        logger.info("Monitoring thread started")
-    else:
-        logger.warning("Docker API client is not initialized. Monitoring thread not started.")
-except Exception as e:
-    logger.error(f"Failed to start monitoring thread: {e}")
 
 # Health check endpoint
 @app.route("/health", methods=["GET"])
