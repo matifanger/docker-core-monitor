@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 # Enable CORS for all routes and origins
-CORS(app, resources={r"/*": {"origins": "*"}})
+CORS(app)
 
 # Configure SocketIO with ping_timeout and ping_interval to prevent disconnections
 socketio = SocketIO(
