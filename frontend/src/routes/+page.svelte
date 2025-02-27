@@ -784,11 +784,11 @@
             networkChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: Array(30).fill(''),
+                    labels: Array(10).fill(''),
                     datasets: [
                         {
                             label: 'RX (Download)',
-                            data: Array(30).fill(0),
+                            data: Array(10).fill(0),
                             borderColor: 'rgba(75, 192, 192, 1)',
                             backgroundColor: 'rgba(75, 192, 192, 0.2)',
                             tension: 0.4,
@@ -796,7 +796,7 @@
                         },
                         {
                             label: 'TX (Upload)',
-                            data: Array(30).fill(0),
+                            data: Array(10).fill(0),
                             borderColor: 'rgba(255, 99, 132, 1)',
                             backgroundColor: 'rgba(255, 99, 132, 0.2)',
                             tension: 0.4,
@@ -807,6 +807,9 @@
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
+                    animation: {
+                        duration: 300  // Reducir duración de animación para actualizaciones más rápidas
+                    },
                     scales: {
                         y: {
                             beginAtZero: true,
@@ -817,11 +820,23 @@
                             }
                         }
                     },
-                    animation: {
-                        duration: 500
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    return `${context.dataset.label}: ${formatBytes(Number(context.raw))}`;
+                                }
+                            }
+                        }
                     }
                 }
             });
+            
+            // Inicializar el historial de red con valores vacíos
+            networkHistory = { 
+                rx: Array(10).fill(0), 
+                tx: Array(10).fill(0) 
+            };
         }
 
         const socket = io(SOCKET_URL, {
@@ -833,7 +848,13 @@
 
         socket.on('connect', () => {
             console.log('Connected to server');
-            // No es necesario llamar a startMonitoring() aquí, el backend lo inicia automáticamente
+            // Solicitar estadísticas inmediatamente al conectarse
+            socket.emit('request_stats');
+            
+            // También podemos forzar una actualización de contenedores
+            if (!isUserInteracting) {
+                fetchContainers();
+            }
         });
 
         socket.on("update_stats", (data: { 
@@ -1112,20 +1133,43 @@
 
     // Functions to update network history and chart
     function updateNetworkHistory() {
-        const totalRx = Object.values(stats).reduce((sum, stat) => sum + stat.network_rx, 0);
-        const totalTx = Object.values(stats).reduce((sum, stat) => sum + stat.network_tx, 0);
-        networkHistory.rx = [...networkHistory.rx.slice(-9), totalRx].slice(-10);
-        networkHistory.tx = [...networkHistory.tx.slice(-9), totalTx].slice(-10);
+        // Calcular totales de red de manera eficiente
+        let totalRx = 0;
+        let totalTx = 0;
+        
+        // Usar Object.values es más eficiente que iterar con for...in
+        const statsValues = Object.values(stats);
+        for (let i = 0; i < statsValues.length; i++) {
+            const stat = statsValues[i];
+            totalRx += stat.network_rx || 0;
+            totalTx += stat.network_tx || 0;
+        }
+        
+        // Actualizar el historial manteniendo los últimos 10 valores
+        networkHistory = {
+            rx: [...networkHistory.rx.slice(-9), totalRx],
+            tx: [...networkHistory.tx.slice(-9), totalTx]
+        };
     }
     
     function updateNetworkChart() {
-        if (networkChart) {
-            // Update chart data
-            networkChart.data.labels = Array(networkHistory.rx.length).fill('');
-            networkChart.data.datasets[0].data = networkHistory.rx;
-            networkChart.data.datasets[1].data = networkHistory.tx;
-            networkChart.update();
-        }
+        if (!networkChart) return;
+        
+        // Get appropriate unit for display based on current values
+        const allValues = [...networkHistory.rx, ...networkHistory.tx];
+        const { divisor, unit } = getNetworkChartUnit(allValues);
+        
+        // Update datasets with new values
+        networkChart.data.labels = Array.from({ length: networkHistory.rx.length }, (_, i) => `T-${networkHistory.rx.length - 1 - i}`);
+        networkChart.data.datasets[0].data = networkHistory.rx.map(v => v / divisor);
+        networkChart.data.datasets[1].data = networkHistory.tx.map(v => v / divisor);
+        
+        // Update dataset labels with current unit
+        networkChart.data.datasets[0].label = `RX (${unit})`;
+        networkChart.data.datasets[1].label = `TX (${unit})`;
+        
+        // Use 'none' mode for more efficient updates
+        networkChart.update('none');
     }
 </script>
 

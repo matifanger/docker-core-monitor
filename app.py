@@ -410,6 +410,43 @@ def handle_connect():
         logger.error(f"Error handling socket connection: {e}")
         emit("error", {"message": "Failed to get initial stats"})
 
+@socketio.on("request_stats")
+def handle_request_stats():
+    """Handle explicit request for stats from client"""
+    try:
+        # Fetch current stats
+        current_stats = {}
+        if docker_api is not None:
+            current_stats = fetch_container_stats()
+        
+        # Get system info
+        system_info = {"MemTotal": 0, "NCPU": 0}
+        if docker_api is not None:
+            try:
+                system_info = {
+                    "MemTotal": docker_api.info().get("MemTotal", 0),
+                    "NCPU": docker_api.info().get("NCPU", 0)
+                }
+            except Exception as e:
+                logger.error(f"Error getting system info: {e}")
+                if initialize_docker_client():
+                    system_info = {
+                        "MemTotal": docker_api.info().get("MemTotal", 0),
+                        "NCPU": docker_api.info().get("NCPU", 0)
+                    }
+        
+        # Send data only to the requesting client
+        emit("update_stats", {
+            "containers": current_stats,
+            "system_info": system_info,
+            "custom_names": custom_names
+        })
+        
+        logger.info("Sent stats in response to explicit request")
+    except Exception as e:
+        logger.error(f"Error handling stats request: {e}")
+        emit("error", {"message": "Failed to get stats on request"})
+
 def monitoring_thread():
     """Thread that continuously fetches container stats and emits them via Socket.IO"""
     global docker_api, monitoring_thread_running
