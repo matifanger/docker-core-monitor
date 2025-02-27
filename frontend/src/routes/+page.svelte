@@ -841,10 +841,11 @@
 
         const socket = io(SOCKET_URL, {
             transports: ['websocket'],
-            reconnectionAttempts: 5,
-            reconnectionDelay: 1000,
+            reconnectionDelay: 200,
             timeout: 20000
         });
+
+        console.warn("About to connect to server...");
 
         socket.on('connect', () => {
             console.log('Connected to server');
