@@ -98,6 +98,10 @@ custom_names = {"containers": {}, "groups": {}, "container_groups": {}}
 monitoring_thread_running = False
 last_docker_error_time = 0
 docker_error_count = 0
+# Caché para optimizar las consultas
+container_cache = {}
+last_full_update_time = 0
+FULL_UPDATE_INTERVAL = 30  # Actualización completa cada 30 segundos
 
 # Constants
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
@@ -187,6 +191,19 @@ def get_container_stats(container):
         container_name = container.name
         container_status = container.status
         
+        # Check cache for non-running containers or containers that were recently fetched
+        current_time = time.time()
+        if container_id in container_cache:
+            cached_data = container_cache[container_id]
+            # Si el contenedor no está en ejecución, usar caché
+            if container_status != "running":
+                return (container_id, cached_data)
+            # Si el contenedor está en ejecución pero se actualizó recientemente (menos de 2 segundos)
+            # y no es tiempo de actualización completa, usar caché
+            if current_time - cached_data.get("last_update_time", 0) < 2 and \
+               current_time - last_full_update_time > FULL_UPDATE_INTERVAL:
+                return (container_id, cached_data)
+        
         # Parse StartedAt
         started_at_str = container.attrs["State"]["StartedAt"]
         # Format expected: '2025-02-24T03:26:18.76286698+00:00'
@@ -194,30 +211,37 @@ def get_container_stats(container):
         started_at = datetime.strptime(started_at_str.split('.')[0] + '.' + started_at_str.split('.')[1][:6] + '+0000', '%Y-%m-%dT%H:%M:%S.%f%z')
         uptime = (time.time() - started_at.timestamp()) if container_status == "running" else 0
         
-        # Obtener límites de CPU
+        # Obtener límites de CPU - solo si no están en caché o es actualización completa
         cpu_limit = None
         cpu_shares = None
-        
-        # Verificar si hay límites de CPU configurados
-        host_config = container.attrs.get("HostConfig", {})
-        if host_config.get("NanoCpus"):
-            # NanoCpus está en billonésimas de CPU, convertir a número de CPUs
-            cpu_limit = host_config.get("NanoCpus") / 1e9
-        elif host_config.get("CpuPeriod") and host_config.get("CpuQuota"):
-            # Otra forma de limitar CPUs
-            cpu_limit = host_config.get("CpuQuota") / host_config.get("CpuPeriod")
-        
-        # CPU Shares (peso relativo)
-        if host_config.get("CpuShares") and host_config.get("CpuShares") != 0 and host_config.get("CpuShares") != 1024:
-            cpu_shares = host_config.get("CpuShares")
-        
-        # Obtener número de CPUs asignadas
         cpu_count = None
-        if container.attrs.get("Config", {}).get("Cpuset"):
-            cpuset = container.attrs.get("Config", {}).get("Cpuset")
-            if cpuset:
-                # Contar cuántos CPUs están asignados en el cpuset
-                cpu_count = len([x for x in cpuset.split(',') if x])
+        
+        if container_id not in container_cache or current_time - last_full_update_time <= FULL_UPDATE_INTERVAL:
+            # Verificar si hay límites de CPU configurados
+            host_config = container.attrs.get("HostConfig", {})
+            if host_config.get("NanoCpus"):
+                # NanoCpus está en billonésimas de CPU, convertir a número de CPUs
+                cpu_limit = host_config.get("NanoCpus") / 1e9
+            elif host_config.get("CpuPeriod") and host_config.get("CpuQuota"):
+                # Otra forma de limitar CPUs
+                cpu_limit = host_config.get("CpuQuota") / host_config.get("CpuPeriod")
+            
+            # CPU Shares (peso relativo)
+            if host_config.get("CpuShares") and host_config.get("CpuShares") != 0 and host_config.get("CpuShares") != 1024:
+                cpu_shares = host_config.get("CpuShares")
+            
+            # Obtener número de CPUs asignadas
+            if container.attrs.get("Config", {}).get("Cpuset"):
+                cpuset = container.attrs.get("Config", {}).get("Cpuset")
+                if cpuset:
+                    # Contar cuántos CPUs están asignados en el cpuset
+                    cpu_count = len([x for x in cpuset.split(',') if x])
+        else:
+            # Usar valores en caché
+            cached_data = container_cache[container_id]
+            cpu_limit = cached_data.get("cpu_limit")
+            cpu_shares = cached_data.get("cpu_shares")
+            cpu_count = cached_data.get("cpu_count")
         
         if container_status == "running":
             # Use a timeout for stats call to prevent hanging
@@ -225,11 +249,17 @@ def get_container_stats(container):
                 stats = container.stats(stream=False)
             except requests.exceptions.ReadTimeout:
                 logger.warning(f"Timeout getting stats for container {container_name}")
+                # Si hay datos en caché, usarlos en lugar de fallar
+                if container_id in container_cache:
+                    return (container_id, container_cache[container_id])
                 raise ValueError("Stats request timed out")
             
             # Check if stats is None or doesn't have required fields
             if not stats:
                 logger.error(f"No stats available for container {container_name}")
+                # Si hay datos en caché, usarlos en lugar de fallar
+                if container_id in container_cache:
+                    return (container_id, container_cache[container_id])
                 raise ValueError("No stats available")
                 
             # Get memory stats with safe fallbacks
@@ -268,8 +298,9 @@ def get_container_stats(container):
             # Si el límite es igual al total del host, consideramos que no hay límite
             if docker_api and memory_limit == docker_api.info().get("MemTotal", 0):
                 memory_limit = 0
-                
-            return (container_id, {
+            
+            # Crear el objeto de estadísticas
+            container_stats = {
                 "name": container_name,
                 "status": container_status,
                 "cpu_percent": calculate_cpu_percent(stats) if cpu_stats and precpu_stats else 0.0,
@@ -282,14 +313,21 @@ def get_container_stats(container):
                 "network_tx": tx_bytes,
                 "io_read": io_read,
                 "io_write": io_write,
-                "uptime": uptime
-            })
+                "uptime": uptime,
+                "last_update_time": current_time
+            }
+            
+            # Actualizar caché
+            container_cache[container_id] = container_stats
+            
+            return (container_id, container_stats)
         else:
-            return (container_id, {
+            # Para contenedores que no están en ejecución
+            container_stats = {
                 "name": container_name,
                 "status": container_status,
                 "cpu_percent": 0.0,
-                "cpu_count": 0,
+                "cpu_count": cpu_count,
                 "cpu_limit": cpu_limit,
                 "cpu_shares": cpu_shares,
                 "memory_usage": 0,
@@ -298,10 +336,20 @@ def get_container_stats(container):
                 "network_tx": 0,
                 "io_read": 0,
                 "io_write": 0,
-                "uptime": 0
-            })
+                "uptime": 0,
+                "last_update_time": current_time
+            }
+            
+            # Actualizar caché
+            container_cache[container_id] = container_stats
+            
+            return (container_id, container_stats)
     except Exception as e:
         logger.error(f"Error fetching stats for {container_name}: {e}")
+        # Si hay datos en caché, usarlos en lugar de fallar
+        if container_id in container_cache:
+            return (container_id, container_cache[container_id])
+            
         return (container_id, {
             "name": container_name,
             "status": "error",
@@ -315,11 +363,12 @@ def get_container_stats(container):
             "network_tx": 0,
             "io_read": 0,
             "io_write": 0,
-            "uptime": 0
+            "uptime": 0,
+            "last_update_time": current_time
         })
 
 def fetch_container_stats():
-    global stats, docker_api, docker_error_count, last_docker_error_time
+    global stats, docker_api, docker_error_count, last_docker_error_time, last_full_update_time
     try:
         if docker_api is None:
             # Try to reinitialize Docker client if it's None
@@ -337,8 +386,23 @@ def fetch_container_stats():
                 last_docker_error_time = current_time
                 docker_error_count = 0
         
+        # Determinar si es momento de una actualización completa
+        current_time = time.time()
+        is_full_update = current_time - last_full_update_time > FULL_UPDATE_INTERVAL
+        
+        # Si es una actualización completa, actualizar el timestamp
+        if is_full_update:
+            last_full_update_time = current_time
+            logger.info("Performing full container stats update")
+        
         try:
-            containers = docker_api.containers.list(all=True)
+            # Para actualizaciones parciales, solo obtener contenedores en ejecución
+            # para reducir la carga en la API de Docker
+            if is_full_update:
+                containers = docker_api.containers.list(all=True)
+            else:
+                containers = docker_api.containers.list(all=False)  # Solo contenedores en ejecución
+                
             # Reset error count on successful call
             docker_error_count = 0
         except Exception as e:
@@ -346,16 +410,34 @@ def fetch_container_stats():
             docker_error_count += 1
             return stats  # Return last known stats instead of empty dict
         
-        # Get stats for each container in parallel with a smaller thread pool
-        # to avoid overwhelming the system
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        # Optimizar el número de workers basado en la cantidad de contenedores
+        # pero mantener un límite razonable para no sobrecargar el sistema
+        num_workers = min(max(len(containers), 1), 10)
+        
+        # Get stats for each container in parallel with an optimized thread pool
+        start_time = time.time()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
             container_stats = list(executor.map(get_container_stats, containers))
         
-        # Convert to dictionary
-        stats_dict = {}
-        for container_id, container_stats in container_stats:
-            if container_stats["status"] != "error":  # Skip containers with errors
-                stats_dict[container_id] = container_stats
+        # Medir tiempo de ejecución para diagnóstico
+        fetch_time = time.time() - start_time
+        if fetch_time > 1.0:  # Solo registrar si toma más de 1 segundo
+            logger.info(f"Container stats fetch took {fetch_time:.2f} seconds for {len(containers)} containers")
+        
+        # Si es una actualización parcial, combinar con estadísticas existentes
+        if not is_full_update:
+            # Mantener las estadísticas existentes para contenedores que no están en ejecución
+            stats_dict = stats.copy()
+            # Actualizar solo los contenedores en ejecución
+            for container_id, container_stats in container_stats:
+                if container_stats["status"] != "error":
+                    stats_dict[container_id] = container_stats
+        else:
+            # Para actualización completa, reconstruir el diccionario
+            stats_dict = {}
+            for container_id, container_stats in container_stats:
+                if container_stats["status"] != "error":
+                    stats_dict[container_id] = container_stats
         
         # Apply custom names if they exist
         for container_id, container_stats in stats_dict.items():
@@ -459,6 +541,9 @@ def monitoring_thread():
     consecutive_errors = 0
     max_consecutive_errors = 10
     
+    # Contador para alternar entre actualizaciones rápidas y completas
+    update_counter = 0
+    
     while monitoring_thread_running:
         try:
             # Check if Docker client needs to be reinitialized
@@ -469,6 +554,8 @@ def monitoring_thread():
                     consecutive_errors += 1
                     continue
             
+            start_time = time.time()
+            
             # Fetch container stats
             stats_data = fetch_container_stats()
             
@@ -477,16 +564,29 @@ def monitoring_thread():
             
             # Add system information as metadata
             try:
-                if docker_api:
-                    system_info = {
-                        "MemTotal": docker_api.info().get("MemTotal", 0),
-                        "NCPU": docker_api.info().get("NCPU", 0)
-                    }
+                # Solo obtener información del sistema en actualizaciones completas
+                # o cada 5 actualizaciones para reducir la carga
+                if update_counter % 5 == 0:
+                    if docker_api:
+                        system_info = {
+                            "MemTotal": docker_api.info().get("MemTotal", 0),
+                            "NCPU": docker_api.info().get("NCPU", 0)
+                        }
+                    else:
+                        system_info = {
+                            "MemTotal": 0,
+                            "NCPU": 0
+                        }
                 else:
-                    system_info = {
+                    # Usar la última información del sistema conocida
+                    system_info = getattr(monitoring_thread, 'last_system_info', {
                         "MemTotal": 0,
                         "NCPU": 0
-                    }
+                    })
+                
+                # Guardar para la próxima iteración
+                monitoring_thread.last_system_info = system_info
+                
             except Exception as e:
                 logger.error(f"Error getting system info: {e}")
                 consecutive_errors += 1
@@ -497,11 +597,20 @@ def monitoring_thread():
                         "MemTotal": docker_api.info().get("MemTotal", 0),
                         "NCPU": docker_api.info().get("NCPU", 0)
                     }
+                    # Guardar para la próxima iteración
+                    monitoring_thread.last_system_info = system_info
                 else:
-                    system_info = {
+                    system_info = getattr(monitoring_thread, 'last_system_info', {
                         "MemTotal": 0,
                         "NCPU": 0
-                    }
+                    })
+            
+            # Medir el tiempo total de procesamiento
+            processing_time = time.time() - start_time
+            
+            # Ajustar el tiempo de espera basado en el tiempo de procesamiento
+            # para mantener un intervalo constante entre emisiones
+            wait_time = max(0.1, 2.0 - processing_time)
             
             # Send the data in the format expected by the frontend
             socketio.emit("update_stats", {
@@ -510,8 +619,11 @@ def monitoring_thread():
                 "custom_names": custom_names
             })
             
-            # Sleep for a bit before the next update
-            time.sleep(2)
+            # Incrementar contador de actualizaciones
+            update_counter += 1
+            
+            # Sleep for the calculated wait time
+            time.sleep(wait_time)
             
         except Exception as e:
             logger.error(f"Error in monitoring thread: {e}")
