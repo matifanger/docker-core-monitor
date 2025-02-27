@@ -849,13 +849,6 @@
 
         socket.on('connect', () => {
             console.log('Connected to server');
-            // Solicitar estadísticas inmediatamente al conectarse
-            socket.emit('request_stats');
-            
-            // También podemos forzar una actualización de contenedores
-            if (!isUserInteracting) {
-                fetchContainers();
-            }
         });
 
         socket.on("update_stats", (data: { 

@@ -372,11 +372,14 @@ def fetch_container_stats():
 @socketio.on("connect")
 def handle_connect():
     try:
+        logger.info("Client connected")
         # Send initial stats to new client
         current_stats = {}
+        logger.info("Fetching container stats")
         if docker_api is not None:
             current_stats = fetch_container_stats()
         
+        logger.info("Fetching system info")
         # Get system info
         system_info = {"MemTotal": 0, "NCPU": 0}
         if docker_api is not None:
@@ -393,7 +396,8 @@ def handle_connect():
                         "MemTotal": docker_api.info().get("MemTotal", 0),
                         "NCPU": docker_api.info().get("NCPU", 0)
                     }
-        
+
+        logger.info("Sending initial data")
         # Send initial data
         emit("update_stats", {
             "containers": current_stats,
