@@ -32,7 +32,7 @@ elif async_mode == 'gevent':
     monkey.patch_all()
 
 # Configure logging - only errors and critical info
-logging.basicConfig(level=logging.ERROR, 
+logging.basicConfig(level=logging.INFO, 
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
