@@ -679,6 +679,7 @@
                 container_groups: Record<string, string>
             }
         }) => {
+            console.log("Received update_stats event:", data);
             stats = data.containers || {};
             systemInfo = data.system_info || { MemTotal: 0, NCPU: 0 };
             customNames = data.custom_names || { containers: {}, groups: {}, container_groups: {} };
