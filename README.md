@@ -21,7 +21,7 @@ A real-time Docker container monitoring dashboard built with SvelteKit, Socket.I
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/docker-core-monitor.git
+git clone https://github.com/matifanger/docker-core-monitor.git
 cd docker-core-monitor
 
 # Start the application
