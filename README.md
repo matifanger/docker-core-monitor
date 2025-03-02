@@ -78,7 +78,7 @@ pnpm preview
 ## Project Structure
 
 - `frontend/`: SvelteKit application
-- `app.py`: Python backend server
+- `backend/`: Python backend server
 - `Dockerfile.backend`: Backend Docker configuration
 - `frontend/Dockerfile.frontend`: Frontend Docker configuration
 - `docker-compose.yml`: Docker Compose configuration
