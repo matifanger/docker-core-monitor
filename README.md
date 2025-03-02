@@ -90,3 +90,10 @@ pnpm preview
 - Node.js 16+ and pnpm (for manual frontend setup)
 - Python 3.8+ (for manual backend setup)
 - Docker socket access (when running outside Docker) 
+
+## To-Do
+- [ ] Fix container renaming: Ensure renames persist after a container restart, even when its ID changes.
+- [ ] Support duplicate app names: Allow multiple apps to share the same name without conflicts.
+- [ ] Create a prebuilt Docker image: Enable faster pulls and deployments.
+- [ ] Implement authentication: Add user/password authentication.
+- [ ] Add app controls: Provide Start, Restart, and Stop buttons for apps and container groups.
