@@ -92,8 +92,8 @@ pnpm preview
 - Docker socket access (when running outside Docker) 
 
 ## To-Do
-- [ ] Fix container renaming: Ensure renames persist after a container restart, even when its ID changes.
-- [ ] Support duplicate app names: Allow multiple apps to share the same name without conflicts.
-- [ ] Create a prebuilt Docker image: Enable faster pulls and deployments.
-- [ ] Implement authentication: Add user/password authentication.
-- [ ] Add app controls: Provide Start, Restart, and Stop buttons for apps and container groups.
+- [ ] Fix container renaming – Right now, if a named container restarts, its ID changes. Need a better way to keep the rename.
+- [ ] Allow same names for different apps – Make sure apps can share names without breaking things.
+- [ ] Create a prebuilt Docker image – So pulling is faster and smoother.
+- [ ] Add user authentication – Basic user/password login.
+- [ ] Add app controls – Start, Restart, and Stop buttons for apps and container groups.
