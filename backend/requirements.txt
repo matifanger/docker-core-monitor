@@ -1,0 +1,7 @@
+docker_py==1.10.6
+eventlet==0.39.0
+Flask==3.1.0
+Flask_Cors==5.0.0
+Flask_SocketIO==5.5.1
+gevent==24.11.1
+Requests==2.32.3

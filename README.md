@@ -38,6 +38,7 @@ Visit `http://localhost:4173` in your browser to access the frontend.
 1. Install dependencies:
 ```bash
 # Backend
+cd backend
 pip install -r requirements.txt
 
 # Frontend
