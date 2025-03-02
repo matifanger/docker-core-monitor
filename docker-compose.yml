@@ -3,7 +3,7 @@ version: '3.8'
 services:
   backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile.backend
     container_name: docker-monitor-backend
     volumes:
@@ -25,9 +25,9 @@ services:
     ports:
       - "4173:4173"
     environment:
-      - PUBLIC_API_URL=${PUBLIC_API_URL}
-      - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL}
-      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL}
+      - PUBLIC_API_URL=${PUBLIC_API_URL:-http://localhost:5000}
+      - PUBLIC_SOCKET_URL=${PUBLIC_SOCKET_URL:-http://localhost:5000}
+      - PUBLIC_REFRESH_INTERVAL=${PUBLIC_REFRESH_INTERVAL:-5000}
     depends_on:
       - backend
     restart: unless-stopped
