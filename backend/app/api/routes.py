@@ -147,8 +147,3 @@ def root():
 @app.route("/containers", methods=["GET"])
 def containers_frontend():
     return get_containers_api()
-
-# Favicon route handler
-@app.route("/favicon.ico", methods=["GET"])
-def favicon():
-    return "", 204  # No content response 
