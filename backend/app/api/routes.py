@@ -21,13 +21,14 @@ def get_containers_api():
         for c in containers:
             container_data = {
                 "id": c.id, 
-                "name": c.name, 
+                "name": c.name,
+                "docker_name": c.name,  # Add original Docker name
                 "status": c.status
             }
             
-            # Apply custom container name if exists
-            if c.id in stats_service.custom_names["containers"]:
-                container_data["name"] = stats_service.custom_names["containers"][c.id]
+            # Apply custom container name if exists, using Docker name as key
+            if c.name in stats_service.custom_names["containers"]:
+                container_data["name"] = stats_service.custom_names["containers"][c.name]
                 
             container_list.append(container_data)
             
@@ -41,20 +42,21 @@ def get_containers_api():
 def get_custom_names():
     return jsonify(stats_service.custom_names)
 
-@app.route("/custom-names/container/<container_id>", methods=["POST"])
-def update_container_name(container_id):
+@app.route("/custom-names/container/<path:container_name>", methods=["POST"])
+def update_container_name(container_name):
     try:
         data = request.json
         if not data or "name" not in data:
             return jsonify({"error": "Name is required"}), 400
             
         # Update container name
-        stats_service.custom_names["containers"][container_id] = data["name"]
+        stats_service.custom_names["containers"][container_name] = data["name"]
         stats_service.save_custom_names(stats_service.custom_names)
         
         # Update stats with new name
-        if container_id in stats_service.stats:
-            stats_service.stats[container_id]["name"] = data["name"]
+        for container_id, container_stats in stats_service.stats.items():
+            if container_stats.get("docker_name") == container_name:
+                container_stats["name"] = data["name"]
             
         return jsonify({"success": True, "message": "Container name updated"})
     except Exception as e:
@@ -77,11 +79,11 @@ def update_group_name(group_name):
         app.logger.error(f"Error updating group name: {e}")
         return jsonify({"error": str(e)}), 500
 
-@app.route("/custom-names/container/<container_id>", methods=["DELETE"])
-def reset_container_name(container_id):
+@app.route("/custom-names/container/<path:container_name>", methods=["DELETE"])
+def reset_container_name(container_name):
     try:
-        if container_id in stats_service.custom_names["containers"]:
-            del stats_service.custom_names["containers"][container_id]
+        if container_name in stats_service.custom_names["containers"]:
+            del stats_service.custom_names["containers"][container_name]
             stats_service.save_custom_names(stats_service.custom_names)
             
         return jsonify({"success": True, "message": "Container name reset"})

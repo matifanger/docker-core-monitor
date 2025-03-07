@@ -37,10 +37,10 @@
     
     async function handleUpdateContainerName() {
         if ($editingContainerId === container.id) {
-            const success = await updateContainerName(container.id, $editingName);
+            const success = await updateContainerName(container.docker_name, $editingName);
             if (success) {
                 // Update local state
-                customNames.containers[container.id] = $editingName;
+                customNames.containers[container.docker_name] = $editingName;
                 customNames = customNames;
             }
             cancelEditing();
@@ -48,10 +48,10 @@
     }
     
     async function handleResetContainerName() {
-        const success = await resetContainerName(container.id);
+        const success = await resetContainerName(container.docker_name);
         if (success) {
             // Update local state
-            delete customNames.containers[container.id];
+            delete customNames.containers[container.docker_name];
             customNames = customNames;
         }
     }
@@ -107,7 +107,7 @@
                 >
                     <IconEdit class="w-4 h-4" />
                 </button>
-                {#if customNames.containers[container.id]}
+                {#if customNames.containers[container.docker_name]}
                     <button 
                         class="text-gray-500 hover:text-red-300 transition-colors opacity-70 group-hover:opacity-100"
                         on:click={handleResetContainerName}

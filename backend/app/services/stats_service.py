@@ -226,6 +226,7 @@ def get_container_stats(container):
             # Create stats object
             container_stats = {
                 "name": container_name,
+                "docker_name": container_name,  # Store original Docker name
                 "status": container_status,
                 "cpu_percent": calculate_cpu_percent(stats) if cpu_stats and precpu_stats else 0.0,
                 "cpu_count": cpu_count,
@@ -241,6 +242,10 @@ def get_container_stats(container):
                 "last_update_time": current_time
             }
             
+            # Apply custom name if exists
+            if container_name in custom_names["containers"]:
+                container_stats["name"] = custom_names["containers"][container_name]
+            
             # Update cache
             container_cache[container_id] = container_stats
             
@@ -249,6 +254,7 @@ def get_container_stats(container):
             # For non-running containers
             container_stats = {
                 "name": container_name,
+                "docker_name": container_name,  # Store original Docker name
                 "status": container_status,
                 "cpu_percent": 0.0,
                 "cpu_count": cpu_count,
@@ -276,6 +282,7 @@ def get_container_stats(container):
             
         return (container_id, {
             "name": container_name,
+            "docker_name": container_name,  # Store original Docker name
             "status": "error",
             "cpu_percent": 0.0,
             "cpu_count": 0,

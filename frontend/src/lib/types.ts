@@ -2,6 +2,7 @@
 export interface Container {
     id: string;
     name: string;
+    docker_name: string;
     status: string;
 }
 
