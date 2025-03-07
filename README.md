@@ -92,7 +92,7 @@ pnpm preview
 - Docker socket access (when running outside Docker) 
 
 ## To-Do
-- [ ] Fix container renaming – Right now, if a named container restarts, its ID changes. Need a better way to keep the rename.
+- [X] Fix container renaming – Right now, if a named container restarts, its ID changes. Need a better way to keep the rename.
 - [ ] Allow same names for different apps – Make sure apps can share names without breaking things.
 - [ ] Create a prebuilt Docker image – So pulling is faster and smoother.
 - [ ] Add user authentication – Basic user/password login.
