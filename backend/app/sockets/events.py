@@ -12,6 +12,7 @@ from app.services import docker_service, stats_service
 logger = logging.getLogger(__name__)
 monitoring_thread = None
 monitoring_thread_running = False
+connected_clients = 0  # Track number of connected clients
 
 def start_monitoring_internal():
     """Start the monitoring thread if it's not already running"""
@@ -26,18 +27,22 @@ def start_monitoring_internal():
         """Background thread that monitors container stats and emits updates"""
         while monitoring_thread_running:
             try:
-                # Fetch container stats
-                current_stats = stats_service.fetch_container_stats()
-                
-                # Get system info
-                system_info = docker_service.get_system_info()
-                
-                # Emit update to all connected clients
-                socketio.emit("update_stats", {
-                    "containers": current_stats,
-                    "system_info": system_info,
-                    "custom_names": stats_service.custom_names
-                })
+                # Only fetch stats if there are connected clients
+                if connected_clients > 0:
+                    # Fetch container stats
+                    current_stats = stats_service.fetch_container_stats()
+                    
+                    # Get system info
+                    system_info = docker_service.get_system_info()
+                    
+                    # Emit update to all connected clients
+                    socketio.emit("update_stats", {
+                        "containers": current_stats,
+                        "system_info": system_info,
+                        "custom_names": stats_service.custom_names
+                    })
+                else:
+                    logger.debug("No clients connected. Skipping stats update.")
                 
                 # Sleep for a short interval
                 time.sleep(1)
@@ -61,8 +66,11 @@ def stop_monitoring_internal():
 @socketio.on("connect")
 def handle_connect():
     """Handle client connection"""
+    global connected_clients
     try:
-        logger.info("Client connected")
+        connected_clients += 1
+        logger.info(f"Client connected. Total clients: {connected_clients}")
+        
         # Send initial stats to new client
         current_stats = {}
         logger.info("Fetching container stats")
@@ -123,4 +131,6 @@ def handle_stop_monitoring():
 @socketio.on("disconnect")
 def handle_disconnect():
     """Handle client disconnection"""
-    logger.info("Client disconnected") 
+    global connected_clients
+    connected_clients -= 1
+    logger.info(f"Client disconnected. Total clients: {connected_clients}") 
