@@ -152,18 +152,21 @@
 
 <main class="min-h-screen bg-gray-950 flex flex-col items-center p-4 md:p-8 overflow-hidden">
     <header class="w-full max-w-7xl mb-8">
-        <div class="flex flex-col md:flex-row justify-between items-center gap-4">
-            <h1 class="text-3xl md:text-5xl font-extrabold font-display text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 tracking-tight">
-                DOCKER CORE
-            </h1>
+        <div class="flex flex-row justify-between items-center gap-4">
+            <div class="flex items-center gap-2">
+                <img src="/image.png" alt="Docker Core Monitor" class="w-8 h-8 md:w-10 md:h-10">
+                <h1 class="text-2xl md:text-5xl font-extrabold font-display text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-purple-500 tracking-tight">
+                    DOCKER CORE
+                </h1>
+            </div>
             <button
                 class="p-2 rounded-full bg-gray-800 text-cyan-400 hover:bg-cyan-600 transition-all cursor-pointer"
                 on:click={toggleViewMode}
             >
                 {#if $viewMode === 'groups'}
-                    <IconList class="w-6 h-6" />
+                    <IconList class="w-5 h-5 md:w-6 md:h-6" />
                 {:else}
-                    <IconGrid class="w-6 h-6" />
+                    <IconGrid class="w-5 h-5 md:w-6 md:h-6" />
                 {/if}
             </button>
         </div>
