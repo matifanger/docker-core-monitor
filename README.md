@@ -88,7 +88,7 @@ pnpm preview
 
 - Docker and Docker Compose (for containerized setup)
 - Node.js 16+ and pnpm (for manual frontend setup)
-- Python 3.8+ (for manual backend setup)
+- Python 3.10.5+ (for manual backend setup)
 - Docker socket access (when running outside Docker) 
 
 ## To-Do
