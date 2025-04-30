@@ -32,6 +32,7 @@
     const REFRESH_INTERVAL = parseInt(env.PUBLIC_REFRESH_INTERVAL ?? '10000');
     
     let intervalId: ReturnType<typeof setInterval> | undefined;
+    let isLoading = true;
     
     // Make these functions available globally for the directives, but only in the browser
     if (browser) {
@@ -47,11 +48,15 @@
         
         // Initial data fetch
         const fetchInitialData = async () => {
-            const containersData = await fetchContainers();
-            containers.set(containersData);
-            
-            const namesData = await fetchCustomNames();
-            customNames.set(namesData);
+            try {
+                const containersData = await fetchContainers();
+                containers.set(containersData);
+                
+                const namesData = await fetchCustomNames();
+                customNames.set(namesData);
+            } finally {
+                isLoading = false;
+            }
         };
         
         fetchInitialData();
@@ -174,7 +179,11 @@
         <SystemStats />
     </header>
 
-    {#if $containers.length === 0}
+    {#if isLoading}
+        <div class="text-gray-500 text-xl font-mono animate-pulse">
+            > Loading...
+        </div>
+    {:else if $containers.length === 0}
         <div class="text-gray-500 text-xl font-mono animate-pulse">
             > No systems online...
         </div>
